@@ -31,6 +31,10 @@ struct upfs_directory_header {
     uint32_t version, free_list;
 };
 
+struct upfs_directory_entry_unused {
+    uint32_t next;
+};
+
 struct upfs_directory_entry_name {
     uint32_t directory; /* Where to find the right inode (-1 = here) */
     uint32_t node; /* The index of the node containing this file */
@@ -48,6 +52,7 @@ struct upfs_directory_entry_node {
 struct upfs_directory_entry {
     uint32_t type;
     union {
+        struct upfs_directory_entry_unused unused;
         struct upfs_directory_entry_name name;
         struct upfs_directory_entry_node node;
     } d;
