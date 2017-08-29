@@ -11,7 +11,7 @@
 #define UPFS_NAME_LENGTH        256
 #define UPFS_META_FILE          ".upfs"
 #define UPFS_ALT_META_FILE      "UPFS.DAT"
-#define UPFS_MAGIC              "UPFSDIRE"
+#define UPFS_MAGIC              "UpFSDTbl"
 #define UPFS_MAGIC_LENGTH       8
 
 /* Unused directory entry, free to be reused */
@@ -28,18 +28,20 @@
 
 struct upfs_directory_header {
     char magic[UPFS_MAGIC_LENGTH];
-    uint32_t version;
+    uint32_t version, free_list;
 };
 
 struct upfs_directory_entry_name {
     uint32_t directory; /* Where to find the right inode (-1 = here) */
     uint32_t node; /* The index of the node containing this file */
+    uint32_t reserved;
     char up_name[UPFS_NAME_LENGTH];
 };
 
 struct upfs_directory_entry_node {
     uint16_t mode, nlink;
-    uint32_t uid, gid;
+    uint32_t uid;
+    uint32_t gid;
     char down_name[UPFS_NAME_LENGTH];
 };
 

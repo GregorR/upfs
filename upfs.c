@@ -14,34 +14,53 @@
 static char *root_path = NULL;
 static int root = 0; /* fd */
 
-static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
-    struct upfs_directory_entry *de_name, int *dfd,
-    struct upfs_directory_entry *de_node, int create) {
+static int upfs_open_prime(const char *path, struct stat *sbuf,
+    struct upfs_directory_entry *de_name, 
+    struct upfs_directory_entry *de_node,
+    int *dfd, int *ffd,
+    int flags, mode_t mode) {
 
-    char path_parts[PATH_MAX], *path_tmp;
+    char path_parts[PATH_MAX], *path_base, *path_tmp;
     const char *path_dir, *path_file;
-    int tbl_fd = -1;
-    *dfd = -1;
+    struct upfs_directory_header dh;
+    struct upfs_directory_entry de;
+    int dir_fd = -1, file_fd = -1, tbl_fd = -1;
+    if (de_name) de_name->type = UPFS_ENTRY_UNUSED;
+    if (de_node) de_node->type = UPFS_ENTRY_UNUSED;
+    if (dfd) *dfd = -1;
+    if (ffd) *ffd = -1;
 
     if (path[0] == '/' && !path[1]) {
         /* Special case for the root */
-        de_name->type = de_node->type = UPFS_ENTRY_UNUSED;
-        return fstatat(root, ".", sbuf, 0);
+        if (flags & O_EXCL) {
+            errno = EEXIST;
+            goto error;
+        }
+        if (sbuf && fstatat(root, ".", sbuf, 0) < 0)
+            goto error;
+        if (dfd && (dir_fd = *dfd = dup(root)) < 0)
+            goto error;
+        if (ffd && (file_fd = *ffd = dup(root)) < 0)
+            goto error;
+        return 0;
     }
 
     /* Split up the path */
     strncpy(path_parts, path, PATH_MAX);
     path_parts[PATH_MAX-1] = 0;
-    path_tmp = strrchr(path_parts, '/');
+    path_base = path_parts;
+    while (*path_base == '/')
+        path_base++;
+    path_tmp = strrchr(path_base, '/');
     while (path_tmp && !path_tmp[1]) {
         /* Ends with / */
         *path_tmp = 0;
-        path_tmp = strrchr(path_parts, '/');
+        path_tmp = strrchr(path_base, '/');
     }
     if (!path_tmp) {
         /* No / */
         path_dir = ".";
-        path_file = path_parts;
+        path_file = path_base;
         if (!path_file[0]) {
             /* Empty path */
             errno = ENOENT;
@@ -51,21 +70,21 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
     } else {
         /* Split it */
         *path_tmp++ = 0;
-        path_dir = path_parts;
+        path_dir = path_base;
         path_file = path_tmp;
 
     }
 
     /* First follow the directory */
-    *dfd = openat(root, path_dir, O_RDONLY);
-    if (*dfd < 0)
+    dir_fd = openat(root, path_dir, O_RDONLY);
+    if (dir_fd < 0)
         goto error;
+    if (dfd) *dfd = dir_fd;
 
     /* Now see if there's a directory entry for it */
-    tbl_fd = openat(*dfd, UPFS_META_FILE, create ? O_RDONLY : (O_RDWR|O_CREAT));
-    if (tbl_fd > 0) {
-        struct upfs_directory_header dh;
-        struct upfs_directory_entry de;
+    tbl_fd = openat(dir_fd, UPFS_META_FILE, (flags&O_CREAT) ? (O_RDWR|O_CREAT) : O_RDONLY, 0600);
+    de.type = UPFS_ENTRY_UNUSED;
+    if (tbl_fd >= 0) {
         int shadowed = 0, found = 0;
         ssize_t rd;
 
@@ -75,6 +94,7 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
             /* Fresh table, make the hader */
             memcpy(dh.magic, UPFS_MAGIC, UPFS_MAGIC_LENGTH);
             dh.version = UPFS_VERSION;
+            dh.free_list = (uint32_t) -1;
             if (write(tbl_fd, &dh, sizeof(struct upfs_directory_header)) < 0) {
                 errno = EIO;
                 goto error;
@@ -102,7 +122,7 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
             if (de.type == UPFS_ENTRY_NAME && !strncmp(path_file, de.d.name.up_name, UPFS_NAME_LENGTH)) {
                 /* Found it! */
                 found = 1;
-                *de_name = de;
+                if (de_name) *de_name = de;
                 break;
 
             } else if (de.type == UPFS_ENTRY_NODE && !strncmp(path_file, de.d.node.down_name, UPFS_NAME_LENGTH)) {
@@ -121,8 +141,10 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
             }
 
             /* Node doesn't exist! */
-            if (lseek(tbl_fd, SEEK_SET, sizeof(struct upfs_directory_header) +
-                    de.d.name.node * sizeof(struct upfs_directory_entry)) < 0) {
+            if (lseek(tbl_fd, sizeof(struct upfs_directory_header) +
+                    de.d.name.node * sizeof(struct upfs_directory_entry),
+                    SEEK_SET) < 0) {
+                fprintf(stderr, "Aw heck\n");
                 errno = EIO;
                 goto error;
             }
@@ -137,12 +159,14 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
             }
 
             /* And copy it over */
-            *de_node = de;
+            if (de_node) *de_node = de;
 
-        } else if (create) {
+            path_file = de.d.node.down_name;
+
+        } else if (flags & O_CREAT) {
             /* Create an entry for it (not yet supported) */
             errno = EIO;
-            return -1;
+            goto error;
 
         } else if (shadowed) {
             /* We have to imagine that this file doesn't exist */
@@ -151,7 +175,9 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
 
         } else {
             /* Othwise, indicate we didn't find it */
-            de_name->type = de_node->type = UPFS_ENTRY_UNUSED;
+            de.type = UPFS_ENTRY_UNUSED;
+            if (de_name) de_name->type = UPFS_ENTRY_UNUSED;
+            if (de_node) de_node->type = UPFS_ENTRY_UNUSED;
 
         }
 
@@ -159,28 +185,44 @@ static int upfs_get_directory_entry(const char *path, struct stat *sbuf,
         tbl_fd = -1;
     }
 
-    /* Now we can stat the actual file */
-    if (fstatat(*dfd, de_node->type ? de_node->d.node.down_name : path_file, sbuf, 0) < 0)
-        goto error;
+    /* Open it if asked */
+    if (ffd) {
+        *ffd = file_fd = openat(dir_fd, path_file, flags, mode);
+        if (file_fd < 0)
+            goto error;
+
+        if (sbuf && fstat(file_fd, sbuf) < 0)
+            goto error;
+
+    } else if (sbuf) {
+        /* Just stat it */
+        if (fstatat(dir_fd, path_file, sbuf, 0) < 0)
+            goto error;
+
+    }
+
+    if (!dfd)
+        close(dir_fd);
 
     return 0;
 
 error:
     if (tbl_fd >= 0)
         close(tbl_fd);
-    if (*dfd >= 0)
-        close(*dfd);
+    if (file_fd >= 0)
+        close(file_fd);
+    if (dir_fd >= 0)
+        close(dir_fd);
     return -1;
 }
 
 static int upfs_getattr(const char *path, struct stat *sbuf) {
-    int ret = 0, dfd;
-    struct upfs_directory_entry de_name, de_node;
+    struct upfs_directory_entry de_node;
 
     /* Do the underlying stat */
-    if (upfs_get_directory_entry(path, sbuf, &de_name, &dfd, &de_node, 0) < 0)
+    if (upfs_open_prime(path, sbuf, NULL, &de_node, NULL, NULL, 0, 0) < 0)
         return -1;
-    if (de_name.type == UPFS_ENTRY_UNUSED) {
+    if (de_node.type == UPFS_ENTRY_UNUSED) {
         /* No extended info, use underlying permissions */
         sbuf->st_mode &= (0777|S_IFLNK|S_IFREG|S_IFDIR);
         return 0;
@@ -191,10 +233,42 @@ static int upfs_getattr(const char *path, struct stat *sbuf) {
     sbuf->st_nlink = de_node.d.node.nlink;
     sbuf->st_uid = de_node.d.node.uid;
     sbuf->st_gid = de_node.d.node.gid;
+    return 0;
+}
+
+static int upfs_readlink(const char *path, char *buf, size_t bufsz) {
+    struct upfs_directory_entry de_node;
+    int ffd;
+    ssize_t rd;
+
+    /* Stat the link file */
+    if (upfs_open_prime(path, NULL, NULL, &de_node, NULL, &ffd, 0, 0) < 0)
+        return -1;
+
+    /* Make sure it IS a symlink */
+    if (de_node.type == UPFS_ENTRY_UNUSED ||
+        !(de_node.d.node.mode & S_IFLNK)) {
+        close(ffd);
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* And read it */
+    rd = read(ffd, buf, bufsz - 1);
+    close(ffd);
+    if (rd < 0) {
+        return -1;
+    } else if (rd == 0) {
+        errno = EIO;
+        return -1;
+    }
+
+    return 0;
 }
 
 static struct fuse_operations upfs_operations = {
-    .getattr = upfs_getattr
+    .getattr = upfs_getattr,
+    .readlink = upfs_readlink
 };
 
 int main(int argc, char **argv) {
