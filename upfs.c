@@ -329,6 +329,7 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     int ret;
     int perm_fd = -1, store_fd = -1;
     int save_errno;
+    struct stat sbuf;
     path = correct_path(path);
 
     drop();
@@ -336,8 +337,19 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
-    store_fd = openat(store_root, path, ffi->flags, 0);
-    if (store_fd < 0) goto error;
+    /* If this is a special file of any kind, use perm_fd directly */
+    if (perm_fd >= 0) {
+        ret = fstat(perm_fd, &sbuf);
+        if (!S_ISREG(sbuf.st_mode) && !S_ISDIR(sbuf.st_mode)) {
+            store_fd = dup(perm_fd);
+            if (store_fd < 0) goto error;
+        }
+    }
+
+    if (store_fd < 0) {
+        store_fd = openat(store_root, path, ffi->flags, 0);
+        if (store_fd < 0) goto error;
+    }
 
     if (perm_fd < 0) {
         struct stat sbuf;
@@ -531,6 +543,31 @@ static int upfs_ftruncate(const char *ignore, off_t length, struct fuse_file_inf
     return 0;
 }
 
+static int upfs_fgetattr(const char *ignore, struct stat *sbuf, struct fuse_file_info *ffi)
+{
+    int perm_fd, store_fd;
+    int ret;
+    struct stat store_buf;
+
+    if (!ffi) return -ENOTSUP;
+
+    perm_fd = ffi->fh >> 32;
+    store_fd = (ffi->fh & (uint32_t) -1);
+
+    ret = fstat(perm_fd, sbuf);
+    if (ret < 0) return -errno;
+
+    if (S_ISREG(sbuf->st_mode)) {
+        ret = fstat(store_fd, &store_buf);
+        if (ret < 0) return -errno;
+        sbuf->st_size = store_buf.st_size;
+        sbuf->st_blksize = store_buf.st_blksize;
+        sbuf->st_blocks = store_buf.st_blocks;
+    }
+
+    return 0;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
@@ -551,7 +588,8 @@ static struct fuse_operations upfs_operations = {
     .fsync = upfs_fsync,
     .readdir = upfs_readdir,
     .access = upfs_access,
-    .ftruncate = upfs_ftruncate
+    .ftruncate = upfs_ftruncate,
+    .fgetattr = upfs_fgetattr
 };
 
 int main(int argc, char **argv)
