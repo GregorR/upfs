@@ -337,6 +337,7 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     }
     if (perm_fd < 0) goto error;
 
+    ffi->direct_io = 1;
     ffi->fh = ((uint64_t) perm_fd << 32) + store_fd;
     return 0;
 
@@ -345,6 +346,66 @@ error:
     if (perm_fd >= 0) close(perm_fd);
     if (store_fd >= 0) close(store_fd);
     return -save_errno;
+}
+
+static int upfs_read(const char *ignore, char *buf, size_t size, off_t offset,
+    struct fuse_file_info *ffi)
+{
+    int ret;
+    int fd;
+
+    if (!ffi) return -ENOTSUP;
+
+    fd = (ffi->fh & (uint32_t) -1);
+    ret = pread(fd, buf, size, offset);
+    if (ret < 0) return -errno;
+
+    return ret;
+}
+
+static int upfs_write(const char *ignore, const char *buf, size_t size,
+    off_t offset, struct fuse_file_info *ffi)
+{
+    int ret;
+    int fd;
+
+    if (!ffi) return -ENOTSUP;
+
+    fd = (ffi->fh & (uint32_t) -1);
+    ret = pwrite(fd, buf, size, offset);
+    if (ret < 0) return -errno;
+
+    return ret;
+}
+
+static int upfs_flush(const char *ignore, struct fuse_file_info *ffi)
+{
+    int ret;
+    int fd;
+
+    if (!ffi) return -ENOTSUP;
+
+    fd = (ffi->fh & (uint32_t) -1);
+    fd = dup(fd);
+    if (fd < 0) return -errno;
+    ret = close(fd);
+    if (ret < 0) return -errno;
+
+    return 0;
+}
+
+static int upfs_release(const char *ignore, struct fuse_file_info *ffi)
+{
+    int perm_fd, store_fd;
+
+    if (!ffi) return -ENOTSUP;
+
+    perm_fd = ffi->fh >> 32;
+    store_fd = (ffi->fh & (uint32_t) -1);
+    close(perm_fd);
+    close(store_fd);
+
+    return 0;
 }
 
 static struct fuse_operations upfs_operations = {
@@ -359,7 +420,11 @@ static struct fuse_operations upfs_operations = {
     .chmod = upfs_chmod,
     .chown = upfs_chown,
     .truncate = upfs_truncate,
-    .open = upfs_open
+    .open = upfs_open,
+    .read = upfs_read,
+    .write = upfs_write,
+    .flush = upfs_flush,
+    .release = upfs_release
 };
 
 int main(int argc, char **argv)
