@@ -212,6 +212,7 @@ static int upfs_open_prime(const char *path, int flags, mode_t mode,
     struct upfs_directory_entry de_name, de_node;
     struct fuse_context *fctx;
     int dir_fd = -1, file_fd = -1, tbl_fd = -1;
+    int save_errno;
     if (o) {
         if (o->de_name) o->de_name->type = UPFS_ENTRY_UNUSED;
         if (o->de_node) o->de_node->type = UPFS_ENTRY_UNUSED;
@@ -434,8 +435,9 @@ static int upfs_open_prime(const char *path, int flags, mode_t mode,
                 de_name.d.name.node * sizeof(struct upfs_directory_entry);
 
             /* Create the name */
-            strncpy(de_name.d.name.up_name, path_file, UPFS_NAME_LENGTH-1);
+            de_name.type = UPFS_ENTRY_NAME;
             de_name.d.name.directory = (uint32_t) -1;
+            strncpy(de_name.d.name.up_name, path_file, UPFS_NAME_LENGTH-1);
             name_entry_num = upfs_alloc_entry(tbl_fd, &de_name);
             if (name_entry_num == (uint32_t) -1) {
                 /* Big problem! We need to free the node we just made. */
@@ -493,6 +495,7 @@ static int upfs_open_prime(const char *path, int flags, mode_t mode,
     return 0;
 
 error:
+    save_errno = errno;
     if (tbl_fd >= 0)
         close(tbl_fd);
     if (o && o->name_tbl_fd && *o->name_tbl_fd >= 0)
@@ -503,10 +506,12 @@ error:
         close(file_fd);
     if (dir_fd >= 0)
         close(dir_fd);
+    errno = save_errno;
     return -1;
 }
 
-static int upfs_getattr(const char *path, struct stat *sbuf) {
+static int upfs_getattr(const char *path, struct stat *sbuf)
+{
     struct upfs_directory_entry de_node;
     struct upfs_open_out oo = {0};
 
@@ -514,7 +519,7 @@ static int upfs_getattr(const char *path, struct stat *sbuf) {
     oo.sbuf = sbuf;
     oo.de_node = &de_node;
     if (upfs_open_prime(path, 0, 0, &oo) < 0)
-        return -1;
+        return -errno;
     if (de_node.type == UPFS_ENTRY_UNUSED) {
         /* No extended info, use underlying permissions */
         sbuf->st_mode &= UPFS_SUPPORTED_MODES;
@@ -532,7 +537,7 @@ static int upfs_getattr(const char *path, struct stat *sbuf) {
 static int upfs_readlink(const char *path, char *buf, size_t bufsz)
 {
     struct upfs_directory_entry de_node;
-    int ffd;
+    int ffd, save_errno;
     ssize_t rd;
     struct upfs_open_out oo = {0};
 
@@ -540,24 +545,23 @@ static int upfs_readlink(const char *path, char *buf, size_t bufsz)
     oo.de_node = &de_node;
     oo.ffd = &ffd;
     if (upfs_open_prime(path, O_RDONLY, 0, &oo) < 0)
-        return -1;
+        return -errno;
 
     /* Make sure it IS a symlink */
     if (de_node.type == UPFS_ENTRY_UNUSED ||
         !(de_node.d.node.mode & S_IFLNK)) {
         close(ffd);
-        errno = EINVAL;
-        return -1;
+        return -EINVAL;
     }
 
     /* And read it */
     rd = read(ffd, buf, bufsz - 1);
+    save_errno = errno;
     close(ffd);
     if (rd < 0) {
-        return -1;
+        return -save_errno;
     } else if (rd == 0) {
-        errno = EIO;
-        return -1;
+        return -EIO;
     }
 
     return 0;
@@ -569,6 +573,7 @@ static int upfs_unlink(const char *path)
     struct upfs_directory_entry de_name, de_node;
     int name_tbl_fd = -1, node_tbl_fd = -1;
     int dfd;
+    int save_errno;
     struct upfs_open_out oo = {0};
 
     /* Get the relevant file stats */
@@ -579,7 +584,7 @@ static int upfs_unlink(const char *path)
     oo.node_tbl_fd = &node_tbl_fd;
     oo.dfd = &dfd;
     if (upfs_open_prime(path, O_CREAT, 0, &oo) < 0)
-        goto error;
+        return -errno;
 
     /* Make sure it's a normal file */
     if (de_name.type != UPFS_ENTRY_UNUSED)
@@ -621,13 +626,14 @@ static int upfs_unlink(const char *path)
     return 0;
 
 error:
+    save_errno = errno;
     if (name_tbl_fd >= 0)
         close(name_tbl_fd);
     if (node_tbl_fd >= 0)
         close(node_tbl_fd);
     if (dfd >= 0)
         close(dfd);
-    return -1;
+    return -save_errno;
 }
 
 static int upfs_rmdir(const char *path)
@@ -635,7 +641,7 @@ static int upfs_rmdir(const char *path)
     struct stat sbuf;
     struct upfs_directory_entry de_name, de_node;
     int name_tbl_fd = -1, node_tbl_fd = -1;
-    int dfd;
+    int dfd, save_errno;
     struct upfs_open_out oo = {0};
 
     /* Get the relevant file stats */
@@ -646,7 +652,7 @@ static int upfs_rmdir(const char *path)
     oo.node_tbl_fd = &node_tbl_fd;
     oo.dfd = &dfd;
     if (upfs_open_prime(path, O_CREAT, 0, &oo) < 0)
-        goto error;
+        return -errno;
 
     /* Make sure it's a directory */
     if (de_name.type != UPFS_ENTRY_UNUSED)
@@ -684,20 +690,48 @@ static int upfs_rmdir(const char *path)
     return 0;
 
 error:
+    save_errno = errno;
     if (name_tbl_fd >= 0)
         close(name_tbl_fd);
     if (node_tbl_fd >= 0)
         close(node_tbl_fd);
     if (dfd >= 0)
         close(dfd);
-    return -1;
+    return -save_errno;
+}
+
+static int upfs_symlink(const char *target, const char *path)
+{
+    int ffd = -1;
+    int save_errno;
+    struct upfs_open_out oo = {0};
+
+    /* Create the symlink */
+    oo.ffd = &ffd;
+    if (upfs_open_prime(path, O_WRONLY|O_CREAT|O_EXCL, S_IFREG|S_IFLNK|0644,
+            &oo) < 0)
+        return -errno;
+
+    /* Write it */
+    if (write(ffd, target, strlen(target)) < 0)
+        goto error;
+
+    close(ffd);
+    return 0;
+
+error:
+    save_errno = errno;
+    if (ffd >= 0)
+        close(ffd);
+    return -save_errno;
 }
 
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
     .unlink = upfs_unlink,
-    .rmdir = upfs_rmdir
+    .rmdir = upfs_rmdir,
+    .symlink = upfs_symlink
 };
 
 int main(int argc, char **argv)
