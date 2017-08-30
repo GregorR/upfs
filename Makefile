@@ -1,7 +1,14 @@
-all: upfs
+CC=gcc
+CFLAGS=-O3
+FUSE_FLAGS=`pkg-config --cflags --libs fuse`
+
+all: upfs mount.upfs
 
 upfs: upfs.c
-	gcc -g upfs.c `pkg-config --cflags --libs fuse` -o upfs
+	$(CC) $(CFLAGS) upfs.c $(FUSE_FLAGS) -o upfs
+
+mount.upfs: mountupfs.c
+	$(CC) $(CFLAGS) mountupfs.c -o mount.upfs
 
 clean:
-	rm -f upfs
+	rm -f upfs mount.upfs
