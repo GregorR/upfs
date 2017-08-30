@@ -10,16 +10,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "upfs.h"
-
 char *perm_root_path = NULL, *store_root_path = NULL;
 int perm_root = -1, store_root = -1;
-
-#define CHECK_RET() \
-do { \
-    if (ret >= 0) return ret; \
-    if (errno != EEXIST) return -errno; \
-} while(0)
 
 static void drop(void)
 {
@@ -36,8 +28,10 @@ static void drop(void)
 
 static void regain(void)
 {
+    int store_errno = errno;
     seteuid(0);
     setegid(0);
+    errno = store_errno;
 }
 
 static int upfs_getattr(const char *path, struct stat *sbuf)
@@ -60,11 +54,11 @@ static int upfs_getattr(const char *path, struct stat *sbuf)
         }
         return ret;
     }
-    if (errno != EEXIST) return -errno;
+    if (errno != ENOENT) return -errno;
 
     ret = fstatat(store_root, path, sbuf, 0);
-    CHECK_RET();
-    return -EEXIST;
+    if (ret >= 0) return ret;
+    return -errno;
 }
 
 static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
@@ -79,9 +73,80 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
     return -errno;
 }
 
+static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
+{
+    int ret;
+    path++;
+
+    /* Create the full thing on the perms fs */
+    drop();
+    ret = mknodat(perm_root, path, mode, dev);
+    regain();
+    fprintf(stderr, " %d\n", ret);
+    if (ret < 0) return -errno;
+
+    /* Then create an empty file to represent it on the store */
+    ret = mknodat(store_root, path, S_IFREG|0600, 0);
+    if (ret >= 0) return ret;
+    return -errno;
+}
+
+static int upfs_mkdir(const char *path, mode_t mode)
+{
+    int ret;
+    path++;
+
+    drop();
+    ret = mkdirat(perm_root, path, mode);
+    regain();
+    if (ret < 0) return -errno;
+
+    ret = mkdirat(store_root, path, 0700);
+    if (ret >= 0) return ret;
+    return -errno;
+}
+
+static int upfs_unlink(const char *path)
+{
+    int perm_ret, store_ret;
+    path++;
+
+    drop();
+    perm_ret = unlinkat(perm_root, path, 0);
+    regain();
+    if (perm_ret < 0 && errno != ENOENT) return -errno;
+
+    store_ret = unlinkat(store_root, path, 0);
+    if (store_ret < 0 && errno != ENOENT) return -errno;
+
+    if (perm_ret >= 0 || store_ret >= 0) return 0;
+    return -ENOENT;
+}
+
+static int upfs_rmdir(const char *path)
+{
+    int perm_ret, store_ret;
+    path++;
+
+    drop();
+    perm_ret = unlinkat(perm_root, path, AT_REMOVEDIR);
+    regain();
+    if (perm_ret < 0 && errno != ENOENT) return -errno;
+
+    store_ret = unlinkat(store_root, path, AT_REMOVEDIR);
+    if (store_ret < 0 && errno != ENOENT) return -errno;
+
+    if (perm_ret >= 0 || store_ret >= 0) return 0;
+    return -ENOENT;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
-    .readlink = upfs_readlink
+    .readlink = upfs_readlink,
+    .mknod = upfs_mknod,
+    .mkdir = upfs_mkdir,
+    .unlink = upfs_unlink,
+    .rmdir = upfs_rmdir
 };
 
 int main(int argc, char **argv)
