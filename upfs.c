@@ -408,6 +408,22 @@ static int upfs_release(const char *ignore, struct fuse_file_info *ffi)
     return 0;
 }
 
+static int upfs_fsync(const char *ignore, int datasync, struct fuse_file_info *ffi)
+{
+    int fd, ret;
+
+    if (!ffi) return -ENOTSUP;
+
+    fd = (ffi->fh & (uint32_t) -1);
+    if (datasync)
+        ret = fdatasync(fd);
+    else
+        ret = fsync(fd);
+
+    if (ret < 0) return -errno;
+    return 0;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
@@ -424,7 +440,8 @@ static struct fuse_operations upfs_operations = {
     .read = upfs_read,
     .write = upfs_write,
     .flush = upfs_flush,
-    .release = upfs_release
+    .release = upfs_release,
+    .fsync = upfs_fsync
 };
 
 int main(int argc, char **argv)
