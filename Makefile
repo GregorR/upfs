@@ -10,5 +10,9 @@ upfs: upfs.c
 mount.upfs: mountupfs.c
 	$(CC) $(CFLAGS) mountupfs.c -o mount.upfs
 
+install: all
+	install upfs /usr/bin/upfs
+	install mount.upfs /sbin/mount.upfs
+
 clean:
 	rm -f upfs mount.upfs
