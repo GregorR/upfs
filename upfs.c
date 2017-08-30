@@ -726,12 +726,116 @@ error:
     return -save_errno;
 }
 
+static int upfs_rename(const char *from, const char *to)
+{
+    struct stat sbuf;
+    struct upfs_directory_entry from_de_node, to_de_node;
+    int from_name_tbl_fd = -1, from_node_tbl_fd = -1;
+    int to_node_tbl_fd = -1;
+    int from_dfd = -1, to_dfd = -1;
+    int save_errno;
+    struct upfs_open_out from_oo = {0}, to_oo = {0};
+
+    /* Make sure the input file exists */
+    from_oo.sbuf = &sbuf;
+    from_oo.de_node = &from_de_node;
+    from_oo.name_tbl_fd = &from_name_tbl_fd;
+    from_oo.node_tbl_fd = &from_node_tbl_fd;
+    from_oo.dfd = &from_dfd;
+    if (upfs_open_prime(from, 0, 0, &from_oo) < 0)
+        return -errno;
+
+    /* If it's not indexed, whip up a fake node */
+    if (from_de_node.type == UPFS_ENTRY_UNUSED) {
+        from_de_node.type = UPFS_ENTRY_NODE;
+        from_de_node.d.node.mode = sbuf.st_mode;
+        from_de_node.d.node.nlink = 1;
+        from_de_node.d.node.uid = sbuf.st_uid;
+        from_de_node.d.node.gid = sbuf.st_gid;
+        close(from_dfd);
+        from_dfd = -1;
+    }
+
+    /* Can't do it with hardlinks */
+    if (from_de_node.d.node.nlink > 1) {
+        errno = ENOTSUP;
+        goto error;
+    }
+
+    /* Make sure the output file exists, so we don't overwrite anything unexpected */
+    to_oo.de_node = &to_de_node;
+    to_oo.node_tbl_fd = &to_node_tbl_fd;
+    to_oo.dfd = &to_dfd;
+    if (upfs_open_prime(to, O_WRONLY|O_CREAT, 0600, &to_oo) < 0)
+        goto error;
+
+    /* Rename the underlying file */
+    if (from_dfd >= 0) {
+        if (renameat(from_dfd, from_de_node.d.node.down_name,
+                     to_dfd, to_de_node.d.node.down_name) < 0)
+            goto error;
+        close(from_dfd);
+        from_dfd = -1;
+    } else {
+        if (renameat(root, from,
+                     to_dfd, to_de_node.d.node.down_name) < 0)
+            goto error;
+    }
+
+    close(to_dfd);
+    to_dfd = -1;
+
+    /* Fix the modes */
+    to_de_node.d.node.mode = from_de_node.d.node.mode;
+    to_de_node.d.node.nlink = from_de_node.d.node.nlink;
+    to_de_node.d.node.uid = from_de_node.d.node.uid;
+    to_de_node.d.node.gid = from_de_node.d.node.gid;
+    if (lseek(to_node_tbl_fd, to_oo.node_tbl_off, SEEK_SET) < 0)
+        goto error;
+    if (write(to_node_tbl_fd, &to_de_node, sizeof(struct upfs_directory_entry))
+        != sizeof(struct upfs_directory_entry)) {
+        errno = errno?errno:EIO;
+        goto error;
+    }
+    close(to_node_tbl_fd);
+    to_node_tbl_fd = -1;
+
+    /* Delete the old one */
+    if (from_name_tbl_fd >= 0) {
+        upfs_free_entry(from_name_tbl_fd, from_oo.name_tbl_off);
+        close(from_name_tbl_fd);
+        from_name_tbl_fd = -1;
+    }
+    if (from_node_tbl_fd >= 0) {
+        upfs_free_entry(from_node_tbl_fd, from_oo.node_tbl_off);
+        close(from_node_tbl_fd);
+        from_node_tbl_fd = -1;
+    }
+
+    return 0;
+
+error:
+    save_errno = errno;
+    if (from_name_tbl_fd >= 0)
+        close(from_name_tbl_fd);
+    if (from_node_tbl_fd >= 0)
+        close(from_node_tbl_fd);
+    if (to_node_tbl_fd >= 0)
+        close(to_node_tbl_fd);
+    if (from_dfd >= 0)
+        close(from_dfd);
+    if (to_dfd >= 0)
+        close(to_dfd);
+    return -save_errno;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
     .unlink = upfs_unlink,
     .rmdir = upfs_rmdir,
-    .symlink = upfs_symlink
+    .symlink = upfs_symlink,
+    .rename = upfs_rename
 };
 
 int main(int argc, char **argv)
