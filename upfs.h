@@ -14,6 +14,9 @@
 #define UPFS_MAGIC              "UpFSDTbl"
 #define UPFS_MAGIC_LENGTH       8
 
+/* The mode bits we support */
+#define UPFS_SUPPORTED_MODES    (07777|S_IFLNK|S_IFREG|S_IFDIR)
+
 /* Unused directory entry, free to be reused */
 #define UPFS_ENTRY_UNUSED       0
 
