@@ -30,6 +30,22 @@ establish such a scheme like so:
 Note in particular that for FAT, `check=s` is very important, to make the case
 sensitivity of the store and permissions directories the same.
 
+## Sharing
+
+For the most part, it's harmless to do anything with the store directory while
+UpFS isn't mounted. In particular, of course, this means that it's mostly
+harmless to mount the store directory in another operating system. Of course,
+it will be accessible with no permissions protection.
+
+There are some exceptions. Deleting files in the store can cause strange
+effects, as the files will not appear to exist when mounted under UpFS, but
+also cannot be created, because they already exist! This is deliberate, so that
+incorrect mounting doesn't clobber the permissions directory. Since the
+permissions directory has normal Unix permissions, it's easy to rectify this
+issue: The user encountering it can delete the files in the permissions
+directory. Of course, that means that the user has to know and understand what
+is happening and why.
+
 ## Implementation
 
 UpFS is implemented as a FUSE filesystem. This makes it slow. For my use case,
