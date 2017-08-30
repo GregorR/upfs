@@ -308,7 +308,43 @@ error:
     save_errno = errno;
     if (perm_fd >= 0) close(perm_fd);
     if (store_fd >= 0) close(store_fd);
-    return -1;
+    return -save_errno;
+}
+
+static int upfs_open(const char *path, struct fuse_file_info *ffi)
+{
+    int ret;
+    int perm_fd = -1, store_fd = -1;
+    int save_errno;
+    path++;
+
+    drop();
+    perm_fd = openat(perm_root, path, ffi->flags, 0);
+    regain();
+    if (perm_fd < 0 && errno != ENOENT) return -errno;
+
+    store_fd = openat(store_root, path, ffi->flags, 0);
+    if (store_fd < 0) goto error;
+
+    if (perm_fd < 0) {
+        struct stat sbuf;
+        ret = fstatat(store_root, path, &sbuf, 0);
+        if (ret < 0) goto error;
+        drop();
+        mkfull(path, &sbuf);
+        perm_fd = openat(perm_root, path, ffi->flags, 0);
+        regain();
+    }
+    if (perm_fd < 0) goto error;
+
+    ffi->fh = ((uint64_t) perm_fd << 32) + store_fd;
+    return 0;
+
+error:
+    save_errno = errno;
+    if (perm_fd >= 0) close(perm_fd);
+    if (store_fd >= 0) close(store_fd);
+    return -save_errno;
 }
 
 static struct fuse_operations upfs_operations = {
@@ -322,7 +358,8 @@ static struct fuse_operations upfs_operations = {
     .rename = upfs_rename,
     .chmod = upfs_chmod,
     .chown = upfs_chown,
-    .truncate = upfs_truncate
+    .truncate = upfs_truncate,
+    .open = upfs_open
 };
 
 int main(int argc, char **argv)
