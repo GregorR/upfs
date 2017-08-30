@@ -238,6 +238,32 @@ static int upfs_chmod(const char *path, mode_t mode)
         drop();
         mkfull(path, &sbuf);
         perm_ret = fchmodat(perm_root, path, mode, 0);
+        regain();
+    }
+
+    if (perm_ret < 0) return -errno;
+    return 0;
+}
+
+static int upfs_chown(const char *path, uid_t uid, gid_t gid)
+{
+    int perm_ret, store_ret;
+    struct stat sbuf;
+    path++;
+
+    drop();
+    perm_ret = fchownat(perm_root, path, uid, gid, 0);
+    regain();
+    if (perm_ret < 0 && errno != ENOENT) return -errno;
+
+    store_ret = fstatat(store_root, path, &sbuf, 0);
+    if (store_ret < 0) return -errno;
+
+    if (perm_ret < 0) {
+        drop();
+        mkfull(path, &sbuf);
+        perm_ret = fchownat(perm_root, path, uid, gid, 0);
+        regain();
     }
 
     if (perm_ret < 0) return -errno;
@@ -253,7 +279,8 @@ static struct fuse_operations upfs_operations = {
     .rmdir = upfs_rmdir,
     .symlink = upfs_symlink,
     .rename = upfs_rename,
-    .chmod = upfs_chmod
+    .chmod = upfs_chmod,
+    .chown = upfs_chown
 };
 
 int main(int argc, char **argv)
