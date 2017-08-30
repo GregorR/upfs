@@ -29,12 +29,12 @@ static const char *correct_path(const char *path)
 static void drop(void)
 {
     struct fuse_context *fctx = fuse_get_context();
-    if (seteuid(fctx->uid) < 0) {
-        perror("seteuid");
-        exit(1);
-    }
     if (setegid(fctx->gid) < 0) {
         perror("setegid");
+        exit(1);
+    }
+    if (seteuid(fctx->uid) < 0) {
+        perror("seteuid");
         exit(1);
     }
     if (fctx->umask == 0)
@@ -135,7 +135,6 @@ static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
     drop();
     ret = mknodat(perm_root, path, mode, dev);
     regain();
-    fprintf(stderr, " %d\n", ret);
     if (ret < 0) return -errno;
 
     /* Then create an empty file to represent it on the store */
@@ -568,6 +567,45 @@ static int upfs_fgetattr(const char *ignore, struct stat *sbuf, struct fuse_file
     return 0;
 }
 
+static int upfs_lock(const char *ignore, struct fuse_file_info *ffi, int cmd,
+    struct flock *fl)
+{
+    int fd, ret;
+
+    if (!ffi) return -ENOTSUP;
+
+    fd = (ffi->fh & (uint32_t) -1);
+    ret = fcntl(fd, cmd, fl);
+    if (ret < 0) return -errno;
+
+    return 0;
+}
+
+static int upfs_utimens(const char *path, const struct timespec times[2])
+{
+    int perm_ret, store_ret;
+    struct stat sbuf;
+    path = correct_path(path);
+
+    drop();
+    perm_ret = utimensat(perm_root, path, times, 0);
+    regain();
+    if (perm_ret < 0 && errno != ENOENT) return -errno;
+
+    store_ret = fstatat(store_root, path, &sbuf, 0);
+    if (store_ret < 0) return -errno;
+
+    if (perm_ret < 0) {
+        drop();
+        mkfull(path, &sbuf);
+        perm_ret = utimensat(perm_root, path, times, 0);
+        regain();
+    }
+    if (perm_ret < 0) return -errno;
+
+    return 0;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
@@ -589,7 +627,9 @@ static struct fuse_operations upfs_operations = {
     .readdir = upfs_readdir,
     .access = upfs_access,
     .ftruncate = upfs_ftruncate,
-    .fgetattr = upfs_fgetattr
+    .fgetattr = upfs_fgetattr,
+    .lock = upfs_lock,
+    .utimens = upfs_utimens
 };
 
 int main(int argc, char **argv)
