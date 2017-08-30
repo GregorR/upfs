@@ -829,13 +829,51 @@ error:
     return -save_errno;
 }
 
+static int upfs_chmod(const char *path, mode_t mode)
+{
+    struct upfs_directory_entry de;
+    int tbl_fd = -1;
+    int save_errno;
+    struct upfs_open_out oo = {0};
+
+    oo.de_node = &de;
+    oo.node_tbl_fd = &tbl_fd;
+    if (upfs_open_prime(path, O_CREAT, 0, &oo) < 0)
+        return -errno;
+
+    if (de.type == UPFS_ENTRY_UNUSED) {
+        errno = EIO;
+        goto error;
+    }
+
+    /* Just need to update the node */
+    de.d.node.mode = mode;
+    if (lseek(tbl_fd, oo.node_tbl_off, SEEK_SET) < 0)
+        goto error;
+    if (write(tbl_fd, &de, sizeof(struct upfs_directory_entry)) !=
+        sizeof(struct upfs_directory_entry)) {
+        errno = errno?errno:EIO;
+        goto error;
+    }
+
+    close(tbl_fd);
+    return 0;
+
+error:
+    save_errno = errno;
+    if (tbl_fd >= 0)
+        close(tbl_fd);
+    return -save_errno;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
     .unlink = upfs_unlink,
     .rmdir = upfs_rmdir,
     .symlink = upfs_symlink,
-    .rename = upfs_rename
+    .rename = upfs_rename,
+    .chmod = upfs_chmod
 };
 
 int main(int argc, char **argv)
