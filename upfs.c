@@ -4,6 +4,7 @@
 #include <fuse.h>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,7 +45,7 @@ static void regain(void)
 }
 
 /* Attempt to make the directory component of this path */
-static void mkdirP(int dirfd, const char *path, mode_t mode)
+static void mkdir_p(const char *path)
 {
     char buf[PATH_MAX], *slash;
 
@@ -55,9 +56,19 @@ static void mkdirP(int dirfd, const char *path, mode_t mode)
     slash = buf - 1;
     while ((slash = strchr(slash + 1, '/'))) {
         *slash = 0;
-        mkdirat(dirfd, buf, mode);
+        mkdirat(perm_root, buf, 0777);
         *slash = '/';
     }
+}
+
+/* Attempt to make a full file to represent one in the store */
+static void mkfull(const char *path, struct stat *sbuf)
+{
+    mkdir_p(path);
+    if (S_ISDIR(sbuf->st_mode))
+        mkdirat(perm_root, path, 0777);
+    else
+        mknodat(perm_root, path, 0666, 0);
 }
 
 static int upfs_getattr(const char *path, struct stat *sbuf)
@@ -70,13 +81,12 @@ static int upfs_getattr(const char *path, struct stat *sbuf)
     ret = fstatat(perm_root, path, sbuf, AT_SYMLINK_NOFOLLOW);
     regain();
     if (ret >= 0) {
+        store_ret = fstatat(store_root, path, &store_buf, 0);
+        if (store_ret < 0) return -errno;
         if (S_ISREG(sbuf->st_mode)) {
-            store_ret = fstatat(store_root, path, &store_buf, 0);
-            if (store_ret >= 0) {
-                sbuf->st_size = store_buf.st_size;
-                sbuf->st_blksize = store_buf.st_blksize;
-                sbuf->st_blocks = store_buf.st_blocks;
-            }
+            sbuf->st_size = store_buf.st_size;
+            sbuf->st_blksize = store_buf.st_blksize;
+            sbuf->st_blocks = store_buf.st_blocks;
         }
         return ret;
     }
@@ -90,13 +100,17 @@ static int upfs_getattr(const char *path, struct stat *sbuf)
 static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
 {
     ssize_t ret;
+    struct stat sbuf;
     path++;
 
     drop();
     ret = readlinkat(perm_root, path, buf, buf_sz);
     regain();
-    if (ret >= 0) return 0;
-    return -errno;
+    if (ret < 0) return -errno;
+
+    ret = fstatat(store_root, path, &sbuf, 0);
+    if (ret < 0) return -errno;
+    return 0;
 }
 
 static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
@@ -113,8 +127,8 @@ static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
 
     /* Then create an empty file to represent it on the store */
     ret = mknodat(store_root, path, S_IFREG|0600, 0);
-    if (ret >= 0) return ret;
-    return -errno;
+    if (ret < 0) return -errno;
+    return 0;
 }
 
 static int upfs_mkdir(const char *path, mode_t mode)
@@ -128,8 +142,8 @@ static int upfs_mkdir(const char *path, mode_t mode)
     if (ret < 0) return -errno;
 
     ret = mkdirat(store_root, path, 0700);
-    if (ret >= 0) return ret;
-    return -errno;
+    if (ret < 0) return -errno;
+    return 0;
 }
 
 static int upfs_unlink(const char *path)
@@ -143,10 +157,8 @@ static int upfs_unlink(const char *path)
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
     store_ret = unlinkat(store_root, path, 0);
-    if (store_ret < 0 && errno != ENOENT) return -errno;
-
-    if (perm_ret >= 0 || store_ret >= 0) return 0;
-    return -ENOENT;
+    if (store_ret < 0) return -errno;
+    return 0;
 }
 
 static int upfs_rmdir(const char *path)
@@ -160,10 +172,8 @@ static int upfs_rmdir(const char *path)
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
     store_ret = unlinkat(store_root, path, AT_REMOVEDIR);
-    if (store_ret < 0 && errno != ENOENT) return -errno;
-
-    if (perm_ret >= 0 || store_ret >= 0) return 0;
-    return -ENOENT;
+    if (store_ret < 0) return -errno;
+    return 0;
 }
 
 static int upfs_symlink(const char *target, const char *path)
@@ -177,18 +187,60 @@ static int upfs_symlink(const char *target, const char *path)
     if (ret < 0 && errno == ENOENT) {
         /* Maybe need to create containing directories */
         drop();
-        mkdirP(perm_root, path, 0777);
+        mkdir_p(path);
         ret = symlinkat(target, perm_root, path);
         regain();
     }
     if (ret < 0) return -errno;
 
     ret = mknodat(store_root, path, S_IFREG|0600, 0);
-    if (ret < 0 && errno == ENOENT) {
-        mkdirP(store_root, path, 0700);
-        ret = mknodat(store_root, path, S_IFREG|0600, 0);
-    }
     if (ret < 0) return -errno;
+    return 0;
+}
+
+static int upfs_rename(const char *from, const char *to)
+{
+    int perm_ret, store_ret;
+    from++;
+    to++;
+
+    drop();
+    perm_ret = renameat(perm_root, from, perm_root, to);
+    regain();
+    if (perm_ret < 0 && errno == ENOENT) {
+        drop();
+        mkdir_p(to);
+        perm_ret = renameat(perm_root, from, perm_root, to);
+        regain();
+    }
+    if (perm_ret < 0 && errno != ENOENT) return -errno;
+
+    store_ret = renameat(store_root, from, store_root, to);
+    if (store_ret < 0) return -errno;
+    return 0;
+}
+
+static int upfs_chmod(const char *path, mode_t mode)
+{
+    int perm_ret, store_ret;
+    struct stat sbuf;
+    path++;
+
+    drop();
+    perm_ret = fchmodat(perm_root, path, mode, 0);
+    regain();
+    if (perm_ret < 0 && errno != ENOENT) return -errno;
+
+    store_ret = fstatat(store_root, path, &sbuf, 0);
+    if (store_ret < 0) return -errno;
+
+    if (perm_ret < 0) {
+        drop();
+        mkfull(path, &sbuf);
+        perm_ret = fchmodat(perm_root, path, mode, 0);
+    }
+
+    if (perm_ret < 0) return -errno;
     return 0;
 }
 
@@ -199,7 +251,9 @@ static struct fuse_operations upfs_operations = {
     .mkdir = upfs_mkdir,
     .unlink = upfs_unlink,
     .rmdir = upfs_rmdir,
-    .symlink = upfs_symlink
+    .symlink = upfs_symlink,
+    .rename = upfs_rename,
+    .chmod = upfs_chmod
 };
 
 int main(int argc, char **argv)
