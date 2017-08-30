@@ -1,11 +1,13 @@
 #define _XOPEN_SOURCE 700 /* *at */
 
-#define FUSE_USE_VERSION 26
+#define FUSE_USE_VERSION 28
 #include <fuse.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -13,6 +15,7 @@
 char *perm_root_path = NULL, *store_root_path = NULL;
 int perm_root = -1, store_root = -1;
 
+/* Drop to caller privileges */
 static void drop(void)
 {
     struct fuse_context *fctx = fuse_get_context();
@@ -24,14 +27,37 @@ static void drop(void)
         perror("setegid");
         exit(1);
     }
+    if (fctx->umask == 0)
+        umask(022);
+    else
+        umask(fctx->umask);
 }
 
+/* Regain root privileges if applicable */
 static void regain(void)
 {
     int store_errno = errno;
     seteuid(0);
     setegid(0);
+    umask(0);
     errno = store_errno;
+}
+
+/* Attempt to make the directory component of this path */
+static void mkdirP(int dirfd, const char *path, mode_t mode)
+{
+    char buf[PATH_MAX], *slash;
+
+    strncpy(buf, path, PATH_MAX);
+    buf[PATH_MAX-1] = 0;
+
+    /* Make each component (except the last) in turn */
+    slash = buf - 1;
+    while ((slash = strchr(slash + 1, '/'))) {
+        *slash = 0;
+        mkdirat(dirfd, buf, mode);
+        *slash = '/';
+    }
 }
 
 static int upfs_getattr(const char *path, struct stat *sbuf)
@@ -140,13 +166,40 @@ static int upfs_rmdir(const char *path)
     return -ENOENT;
 }
 
+static int upfs_symlink(const char *target, const char *path)
+{
+    int ret;
+    path++;
+
+    drop();
+    ret = symlinkat(target, perm_root, path);
+    regain();
+    if (ret < 0 && errno == ENOENT) {
+        /* Maybe need to create containing directories */
+        drop();
+        mkdirP(perm_root, path, 0777);
+        ret = symlinkat(target, perm_root, path);
+        regain();
+    }
+    if (ret < 0) return -errno;
+
+    ret = mknodat(store_root, path, S_IFREG|0600, 0);
+    if (ret < 0 && errno == ENOENT) {
+        mkdirP(store_root, path, 0700);
+        ret = mknodat(store_root, path, S_IFREG|0600, 0);
+    }
+    if (ret < 0) return -errno;
+    return 0;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
     .mknod = upfs_mknod,
     .mkdir = upfs_mkdir,
     .unlink = upfs_unlink,
-    .rmdir = upfs_rmdir
+    .rmdir = upfs_rmdir,
+    .symlink = upfs_symlink
 };
 
 int main(int argc, char **argv)
