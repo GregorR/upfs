@@ -3,6 +3,7 @@
 #define FUSE_USE_VERSION 28
 #include <fuse.h>
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -15,6 +16,14 @@
 
 char *perm_root_path = NULL, *store_root_path = NULL;
 int perm_root = -1, store_root = -1;
+
+/* Correct incoming paths */
+static const char *correct_path(const char *path)
+{
+    if (path[0] == '/') path++;
+    if (!path[0]) return ".";
+    return path;
+}
 
 /* Drop to caller privileges */
 static void drop(void)
@@ -71,17 +80,16 @@ static void mkfull(const char *path, struct stat *sbuf)
         mknodat(perm_root, path, 0666, 0);
 }
 
-static int upfs_getattr(const char *path, struct stat *sbuf)
+static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, struct stat *sbuf)
 {
     int ret, store_ret;
     struct stat store_buf;
-    path++;
 
     drop();
-    ret = fstatat(perm_root, path, sbuf, AT_SYMLINK_NOFOLLOW);
+    ret = fstatat(perm_dirfd, path, sbuf, AT_SYMLINK_NOFOLLOW);
     regain();
     if (ret >= 0) {
-        store_ret = fstatat(store_root, path, &store_buf, 0);
+        store_ret = fstatat(store_dirfd, path, &store_buf, 0);
         if (store_ret < 0) return -errno;
         if (S_ISREG(sbuf->st_mode)) {
             sbuf->st_size = store_buf.st_size;
@@ -92,16 +100,21 @@ static int upfs_getattr(const char *path, struct stat *sbuf)
     }
     if (errno != ENOENT) return -errno;
 
-    ret = fstatat(store_root, path, sbuf, 0);
+    ret = fstatat(store_dirfd, path, sbuf, 0);
     if (ret >= 0) return ret;
     return -errno;
+}
+
+static int upfs_getattr(const char *path, struct stat *sbuf)
+{
+    return upfs_stat(perm_root, store_root, correct_path(path), sbuf);
 }
 
 static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
 {
     ssize_t ret;
     struct stat sbuf;
-    path++;
+    path = correct_path(path);
 
     drop();
     ret = readlinkat(perm_root, path, buf, buf_sz);
@@ -116,7 +129,7 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
 static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
 {
     int ret;
-    path++;
+    path = correct_path(path);
 
     /* Create the full thing on the perms fs */
     drop();
@@ -134,7 +147,7 @@ static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
 static int upfs_mkdir(const char *path, mode_t mode)
 {
     int ret;
-    path++;
+    path = correct_path(path);
 
     drop();
     ret = mkdirat(perm_root, path, mode);
@@ -149,7 +162,7 @@ static int upfs_mkdir(const char *path, mode_t mode)
 static int upfs_unlink(const char *path)
 {
     int perm_ret, store_ret;
-    path++;
+    path = correct_path(path);
 
     drop();
     perm_ret = unlinkat(perm_root, path, 0);
@@ -164,7 +177,7 @@ static int upfs_unlink(const char *path)
 static int upfs_rmdir(const char *path)
 {
     int perm_ret, store_ret;
-    path++;
+    path = correct_path(path);
 
     drop();
     perm_ret = unlinkat(perm_root, path, AT_REMOVEDIR);
@@ -179,7 +192,7 @@ static int upfs_rmdir(const char *path)
 static int upfs_symlink(const char *target, const char *path)
 {
     int ret;
-    path++;
+    path = correct_path(path);
 
     drop();
     ret = symlinkat(target, perm_root, path);
@@ -224,7 +237,7 @@ static int upfs_chmod(const char *path, mode_t mode)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
-    path++;
+    path = correct_path(path);
 
     drop();
     perm_ret = fchmodat(perm_root, path, mode, 0);
@@ -249,7 +262,7 @@ static int upfs_chown(const char *path, uid_t uid, gid_t gid)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
-    path++;
+    path = correct_path(path);
 
     drop();
     perm_ret = fchownat(perm_root, path, uid, gid, 0);
@@ -275,7 +288,7 @@ static int upfs_truncate(const char *path, off_t length)
     int ret;
     int perm_fd = -1, store_fd = -1;
     int save_errno;
-    path++;
+    path = correct_path(path);
 
     drop();
     perm_fd = openat(perm_root, path, O_RDWR);
@@ -316,7 +329,7 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     int ret;
     int perm_fd = -1, store_fd = -1;
     int save_errno;
-    path++;
+    path = correct_path(path);
 
     drop();
     perm_fd = openat(perm_root, path, ffi->flags, 0);
@@ -424,6 +437,67 @@ static int upfs_fsync(const char *ignore, int datasync, struct fuse_file_info *f
     return 0;
 }
 
+static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+    off_t offset, struct fuse_file_info *ffi)
+{
+    int save_errno;
+    int ret;
+    int perm_fd = -1, store_fd = -1, store_fd2 = -1;
+    DIR *dh = NULL;
+    struct dirent *de;
+    path = correct_path(path);
+
+    /* Check permissions */
+    drop();
+    perm_fd = openat(perm_root, path, O_RDONLY, 0);
+    regain();
+    if (perm_fd < 0 && errno != ENOENT) return -errno;
+
+    /* Open the store directory */
+    store_fd = openat(store_root, path, O_RDONLY, 0);
+    if (store_fd < 0) goto error;
+
+    /* Prepare for readdir */
+    store_fd2 = dup(store_fd);
+    if (store_fd2 < 0) goto error;
+
+    dh = fdopendir(store_fd2);
+    if (!dh) goto error;
+    store_fd2 = -1;
+
+    /* And read it */
+    while ((de = readdir(dh)) != NULL) {
+        struct stat sbuf;
+        if (perm_fd >= 0) {
+            ret = upfs_stat(perm_fd, store_fd, de->d_name, &sbuf);
+            if (ret < 0) {
+                errno = -ret;
+                goto error;
+            }
+        } else {
+            ret = fstatat(store_fd, de->d_name, &sbuf, 0);
+            if (ret < 0) goto error;
+        }
+        if (filler(buf, de->d_name, &sbuf, 0))
+            break;
+    }
+
+    /* Then clean up */
+    closedir(dh);
+    close(store_fd);
+    if (perm_fd >= 0)
+        close(perm_fd);
+    return 0;
+
+error:
+    save_errno = errno;
+    if (perm_fd >= 0) close(perm_fd);
+    if (store_fd >= 0) close(store_fd);
+    if (store_fd2 >= 0) close(store_fd2);
+    if (dh) closedir(dh);
+    return -save_errno;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
@@ -441,7 +515,8 @@ static struct fuse_operations upfs_operations = {
     .write = upfs_write,
     .flush = upfs_flush,
     .release = upfs_release,
-    .fsync = upfs_fsync
+    .fsync = upfs_fsync,
+    .readdir = upfs_readdir
 };
 
 int main(int argc, char **argv)
