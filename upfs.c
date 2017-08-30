@@ -498,6 +498,26 @@ error:
     return -save_errno;
 }
 
+static int upfs_access(const char *path, int mode)
+{
+    int ret;
+    path = correct_path(path);
+
+    drop();
+    ret = faccessat(perm_root, path, mode, AT_EACCESS);
+    regain();
+    if (ret < 0 && errno != ENOENT) return -errno;
+
+    /* Don't check execute bit on store FS */
+    if (mode & X_OK) {
+        mode &= ~(X_OK);
+        if (!mode) mode = R_OK;
+    }
+    ret = faccessat(store_root, path, mode, 0);
+    if (ret < 0) return -errno;
+    return 0;
+}
+
 static struct fuse_operations upfs_operations = {
     .getattr = upfs_getattr,
     .readlink = upfs_readlink,
@@ -516,7 +536,8 @@ static struct fuse_operations upfs_operations = {
     .flush = upfs_flush,
     .release = upfs_release,
     .fsync = upfs_fsync,
-    .readdir = upfs_readdir
+    .readdir = upfs_readdir,
+    .access = upfs_access
 };
 
 int main(int argc, char **argv)
