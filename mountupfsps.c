@@ -1,24 +1,27 @@
+/* FIXME: This is mostly duplicated from mountupfs */
+
 #define _BSD_SOURCE /* strdup */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef UPFS_PATH
-#define UPFS_PATH "/usr/bin/upfs"
+#define UPFS_PATH "/usr/bin/upfs-ps"
 #endif
 
-#define NEED_OPTS "allow_other"
+#define NEED_OPTS "nonempty,allow_other,default_permissions"
 
 void usage(void)
 {
-    fprintf(stderr, "Use: mount.upfs <perm root>:<store root> <mount point>\n");
+    fprintf(stderr, "Use: mount.upfsps <root> <mount point>\n");
 }
 
-void handle_options(char *options, int *mount_p, int *mount_s)
+void handle_options(char *options, int *mount_r)
 {
     char *cur, *comma;
     int skip;
@@ -30,11 +33,8 @@ void handle_options(char *options, int *mount_p, int *mount_s)
         comma = strchr(cur, ',');
         if (comma) *comma = 0;
 
-        if (!strcmp(cur, "mount_p")) {
-            *mount_p = 1;
-            skip = 1;
-        } else if (!strcmp(cur, "mount_s")) {
-            *mount_s = 1;
+        if (!strcmp(cur, "mount_r")) {
+            *mount_r = 1;
             skip = 1;
         }
 
@@ -47,14 +47,33 @@ void handle_options(char *options, int *mount_p, int *mount_s)
     }
 }
 
-void do_mount(char *path)
+void do_mount(char **root, char *target)
 {
-    char *mount_args[3];
+    char *mount_args[4];
     pid_t pid;
+    struct stat sbuf;
+    int check_code = 0, code;
 
-    mount_args[0] = "/bin/mount";
-    mount_args[1] = path;
-    mount_args[2] = NULL;
+    /* Choose what kind of mount to perform based on the type of root */
+    if (stat(*root, &sbuf) < 0)
+        return;
+
+    if (S_ISDIR(sbuf.st_mode)) {
+        /* Normal directory mount out of fstab */
+        mount_args[0] = "/bin/mount";
+        mount_args[1] = *root;
+        mount_args[2] = NULL;
+
+    } else {
+        /* Device mount. FIXME: loop mounting, sub-mount options/type, etc */
+        mount_args[0] = "/bin/mount";
+        mount_args[1] = *root;
+        mount_args[2] = target;
+        mount_args[3] = NULL;
+        check_code = 1;
+        *root = target;
+
+    }
 
     /* Fork off the mount */
     pid = fork();
@@ -64,21 +83,29 @@ void do_mount(char *path)
     }
 
     if (pid >= 0) {
-        waitpid(pid, NULL, 0);
+        waitpid(pid, &code, 0);
     } else {
         execv(mount_args[0], mount_args);
         exit(1);
     }
+
+    /* And check that it worked */
+    if (check_code) {
+        if (!WIFEXITED(code) || WEXITSTATUS(code)) {
+            exit(1);
+        }
+    }
+
 }
 
 int main(int argc, char **argv)
 {
     char *arg, **fuse_argv;
-    char *opt_arg, *perm_root, *store_root;
-    int ai, fai, got_root = 0, got_opts = 0;
-    int mount_p = 0, mount_s = 0;
+    char *opt_arg, **root, *target;
+    int ai, fai, got_root = 0, got_target = 0, got_opts = 0;
+    int mount_r = 0;
 
-    fuse_argv = calloc(argc + 4, sizeof(char *));
+    fuse_argv = calloc(argc + 3, sizeof(char *));
     if (!fuse_argv) {
         perror("calloc");
         return 1;
@@ -99,26 +126,20 @@ int main(int argc, char **argv)
                     return 1;
                 }
                 sprintf(opt_arg, "%s,%s", arg, NEED_OPTS);
-                handle_options(opt_arg, &mount_p, &mount_s);
+                handle_options(opt_arg, &mount_r);
                 fuse_argv[fai++] = opt_arg;
                 got_opts = 1;
             }
 
         } else if (!got_root) {
-            perm_root = strdup(arg);
-            if (!perm_root) {
-                perror("strdup");
-                return 1;
-            }
-            store_root = strchr(perm_root, ':');
-            if (!store_root) {
-                usage();
-                return 1;
-            }
-            *store_root++ = 0;
-            fuse_argv[fai++] = perm_root;
-            fuse_argv[fai++] = store_root;
+            root = &fuse_argv[fai++];
+            *root = arg;
             got_root = 1;
+
+        } else if (!got_target) {
+            target = arg;
+            fuse_argv[fai++] = arg;
+            got_target = 1;
 
         } else {
             fuse_argv[fai++] = arg;
@@ -131,16 +152,14 @@ int main(int argc, char **argv)
         fuse_argv[fai++] = NEED_OPTS;
     }
 
-    if (!got_root) {
+    if (!got_root || !got_target) {
         usage();
         return 1;
     }
 
     /* If we were requested to mount either, do so */
-    if (mount_p)
-        do_mount(perm_root);
-    if (mount_s)
-        do_mount(store_root);
+    if (mount_r)
+        do_mount(root, target);
 
     execv(fuse_argv[0], fuse_argv);
     perror(fuse_argv[0]);
