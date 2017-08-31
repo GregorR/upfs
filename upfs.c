@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/fsuid.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -29,11 +30,11 @@ static const char *correct_path(const char *path)
 static void drop(void)
 {
     struct fuse_context *fctx = fuse_get_context();
-    if (setegid(fctx->gid) < 0) {
+    if (setfsgid(fctx->gid) < 0) {
         perror("setegid");
         exit(1);
     }
-    if (seteuid(fctx->uid) < 0) {
+    if (setfsuid(fctx->uid) < 0) {
         perror("seteuid");
         exit(1);
     }
@@ -47,8 +48,8 @@ static void drop(void)
 static void regain(void)
 {
     int store_errno = errno;
-    seteuid(0);
-    setegid(0);
+    setfsgid(0);
+    setfsuid(0);
     umask(0);
     errno = store_errno;
 }
