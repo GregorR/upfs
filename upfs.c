@@ -118,9 +118,10 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
     path = correct_path(path);
 
     drop();
-    ret = readlinkat(perm_root, path, buf, buf_sz);
+    ret = readlinkat(perm_root, path, buf, buf_sz-1);
     regain();
     if (ret < 0) return -errno;
+    buf[ret] = 0;
 
     ret = fstatat(store_root, path, &sbuf, 0);
     if (ret < 0) return -errno;
