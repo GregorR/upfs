@@ -46,6 +46,31 @@ issue: The user encountering it can delete the files in the permissions
 directory. Of course, that means that the user has to know and understand what
 is happening and why.
 
+## fstab
+
+`mount.upfs` is provided for usage in `/etc/fstab`. The permissions and store
+roots should be colon-separated, so an example full `fstab` line would be:
+
+```
+/mnt/disk_p:/mnt/disk_s /mnt/disk upfs defaults 0 2
+```
+
+Because mounting of `fstab` filesystems is unordered, and because it's common
+for one or both of the permissions and store directories to be full filesystems
+which must be fully mounted before UpFS, `mount.upfs` provides mount options to
+explicitly mount its root directories, `mount_p` and `mount_s`.  These are
+options to `mount.upfs`, but not `upfs`. An example with the storage directory
+mounted from another filesystem:
+
+```
+/dev/sdb1 /mnt/disk_s vfat check=s,uid=0,gid=0,umask=077,noauto 0 2
+/mnt/disk_p:/mnt/disk_s /mnt/disk upfs mount_s 0 2
+```
+
+Note that `noauto` on directories to be mounted by `mount_p` or `mount_s` isn't
+critical, but it does make the output a bit cleaner, as `upfs`'s `mount` will
+reliably succeed.
+
 ## Implementation
 
 UpFS is implemented as a FUSE filesystem. This makes it slow. For my use case,
