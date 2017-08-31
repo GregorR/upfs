@@ -538,6 +538,31 @@ static int upfs_access(const char *path, int mode)
     return 0;
 }
 
+static int upfs_create(const char *path, mode_t mode,
+    struct fuse_file_info *ffi)
+{
+    int perm_fd = -1, store_fd = -1;
+    int save_errno;
+    path = correct_path(path);
+
+    drop();
+    perm_fd = openat(perm_root, path, O_RDWR|O_CREAT|O_EXCL, mode);
+    regain();
+    if (perm_fd < 0) return -errno;
+
+    store_fd = openat(store_root, path, O_RDWR|O_CREAT|O_EXCL, 0600);
+    if (store_fd < 0) goto error;
+
+    ffi->fh = ((uint64_t) perm_fd << 32) + store_fd;
+    return 0;
+
+error:
+    save_errno = errno;
+    if (perm_fd >= 0) close(perm_fd);
+    if (store_fd >= 0) close(store_fd);
+    return -save_errno;
+}
+
 static int upfs_ftruncate(const char *ignore, off_t length, struct fuse_file_info *ffi)
 {
     int fd, ret;
@@ -635,6 +660,7 @@ static struct fuse_operations upfs_operations = {
     .fsync = upfs_fsync,
     .readdir = upfs_readdir,
     .access = upfs_access,
+    .create = upfs_create,
     .ftruncate = upfs_ftruncate,
     .fgetattr = upfs_fgetattr,
     .lock = upfs_lock,
