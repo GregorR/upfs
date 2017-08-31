@@ -75,7 +75,7 @@ static void mkdir_p(const char *path)
     slash = buf - 1;
     while ((slash = strchr(slash + 1, '/'))) {
         *slash = 0;
-        mkdirat(perm_root, buf, 0777);
+        UPFS(mkdirat)(perm_root, buf, 0777);
         *slash = '/';
     }
 }
@@ -85,9 +85,9 @@ static void mkfull(const char *path, struct stat *sbuf)
 {
     mkdir_p(path);
     if (S_ISDIR(sbuf->st_mode))
-        mkdirat(perm_root, path, 0777);
+        UPFS(mkdirat)(perm_root, path, 0777);
     else
-        mknodat(perm_root, path, 0666, 0);
+        UPFS(mknodat)(perm_root, path, 0666, 0);
 }
 
 static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, struct stat *sbuf)
@@ -591,6 +591,11 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     /* And read it */
     while ((de = readdir(dh)) != NULL) {
         struct stat sbuf;
+#ifdef UPFS_PS
+        /* Skip the metafile */
+        if (!strcmp(de->d_name, UPFS_META_FILE))
+            continue;
+#endif
         if (perm_fd >= 0) {
             ret = upfs_stat(perm_fd, store_fd, de->d_name, &sbuf);
             if (ret < 0) {
@@ -789,6 +794,7 @@ int main(int argc, char **argv)
 {
     char *arg, **fuse_argv;
     int ai, fai;
+    struct stat sbuf;
 
     fuse_argv = calloc(argc + 1, sizeof(char *));
     if (!fuse_argv) {
@@ -834,18 +840,26 @@ int main(int argc, char **argv)
     }
 
     /* Open the roots */
+#define OPEN_ROOT(root) do { \
+    root ## _root = open(root ## _root_path, O_RDONLY); \
+    if (root ## _root < 0) { \
+        perror(root ## _root_path); \
+        return 1; \
+    } \
+    if (fstat(root ## _root, &sbuf) < 0) { \
+        perror(root ## _root_path); \
+        return 1; \
+    } \
+    if (!S_ISDIR(sbuf.st_mode)) { \
+        fprintf(stderr, "%s: Must be directory\n", root ## _root_path); \
+        return 1; \
+    } \
+} while(0)
+
 #ifndef UPFS_PS
-    perm_root = open(perm_root_path, O_RDONLY);
-    if (perm_root < 0) {
-        perror(perm_root_path);
-        return 1;
-    }
+    OPEN_ROOT(perm);
 #endif
-    store_root = open(store_root_path, O_RDONLY);
-    if (store_root < 0) {
-        perror(store_root_path);
-        return 1;
-    }
+    OPEN_ROOT(store);
 #ifdef UPFS_PS
     perm_root = store_root;
 #endif

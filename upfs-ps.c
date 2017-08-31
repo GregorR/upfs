@@ -258,7 +258,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     if (found) {
         if (flags & (O_CREAT|O_EXCL)) {
             /* Shouldn't have existed! */
-            errno = -EEXIST;
+            errno = EEXIST;
             goto error;
         }
 
@@ -281,6 +281,11 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
             goto error;
         o->de = de;
         if (o->tbl_fd) *o->tbl_fd = tbl_fd;
+
+    } else {
+        /* Not found */
+        errno = ENOENT;
+        goto error;
 
     }
 
@@ -336,6 +341,8 @@ int upfs_mknodat(int dir_fd, const char *path, mode_t mode, dev_t dev)
         errno = ENOTSUP;
         return -1;
     }
+
+    if (!(mode&S_IFMT)) mode |= S_IFREG;
 
     if (upfs_ps_open(dir_fd, path, O_CREAT|O_EXCL, mode, &o) < 0)
         return -1;
