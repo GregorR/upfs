@@ -344,6 +344,8 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
         if (!S_ISREG(sbuf.st_mode) && !S_ISDIR(sbuf.st_mode)) {
             store_fd = dup(perm_fd);
             if (store_fd < 0) goto error;
+            ffi->direct_io = 1;
+            ffi->nonseekable = 1;
         }
     }
 
@@ -363,7 +365,6 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     }
     if (perm_fd < 0) goto error;
 
-    ffi->direct_io = 1;
     ffi->fh = ((uint64_t) perm_fd << 32) + store_fd;
     return 0;
 
@@ -383,7 +384,10 @@ static int upfs_read(const char *ignore, char *buf, size_t size, off_t offset,
     if (!ffi) return -ENOTSUP;
 
     fd = (ffi->fh & (uint32_t) -1);
-    ret = pread(fd, buf, size, offset);
+    if (ffi->nonseekable)
+        ret = read(fd, buf, size);
+    else
+        ret = pread(fd, buf, size, offset);
     if (ret < 0) return -errno;
 
     return ret;
@@ -398,7 +402,10 @@ static int upfs_write(const char *ignore, const char *buf, size_t size,
     if (!ffi) return -ENOTSUP;
 
     fd = (ffi->fh & (uint32_t) -1);
-    ret = pwrite(fd, buf, size, offset);
+    if (ffi->nonseekable)
+        ret = write(fd, buf, size);
+    else
+        ret = pwrite(fd, buf, size, offset);
     if (ret < 0) return -errno;
 
     return ret;
