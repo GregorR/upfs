@@ -15,27 +15,38 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-char *perm_root_path = NULL, *store_root_path = NULL;
-int perm_root = -1, store_root = -1;
+#ifdef UPFS_PS
 
-/* Correct incoming paths */
-static const char *correct_path(const char *path)
+/* When using permissions tables on the store */
+#include "upfs-ps.h"
+
+static void drop(void)
 {
-    if (path[0] == '/') path++;
-    if (!path[0]) return ".";
-    return path;
+    struct fuse_context *fctx = fuse_get_context();
+    if (fctx->umask == 0)
+        umask(022);
+    else
+        umask(fctx->umask);
 }
 
+static void regain(void)
+{
+    umask(0);
+}
+
+#define UPFS(func) upfs_ ## func
+
+#else
 /* Drop to caller privileges */
 static void drop(void)
 {
     struct fuse_context *fctx = fuse_get_context();
     if (setfsgid(fctx->gid) < 0) {
-        perror("setegid");
+        perror("setfsgid");
         exit(1);
     }
     if (setfsuid(fctx->uid) < 0) {
-        perror("seteuid");
+        perror("setfsuid");
         exit(1);
     }
     if (fctx->umask == 0)
@@ -52,6 +63,22 @@ static void regain(void)
     setfsuid(0);
     umask(0);
     errno = store_errno;
+}
+
+#define UPFS(func) func
+
+#endif
+
+/* Our root paths and fds */
+char *perm_root_path = NULL, *store_root_path = NULL;
+int perm_root = -1, store_root = -1;
+
+/* Correct incoming paths */
+static const char *correct_path(const char *path)
+{
+    if (path[0] == '/') path++;
+    if (!path[0]) return ".";
+    return path;
 }
 
 /* Attempt to make the directory component of this path */
@@ -87,7 +114,7 @@ static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, struct s
     struct stat store_buf;
 
     drop();
-    ret = fstatat(perm_dirfd, path, sbuf, AT_SYMLINK_NOFOLLOW);
+    ret = UPFS(fstatat)(perm_dirfd, path, sbuf, AT_SYMLINK_NOFOLLOW);
     regain();
     if (ret >= 0) {
         store_ret = fstatat(store_dirfd, path, &store_buf, 0);
@@ -118,7 +145,7 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
     path = correct_path(path);
 
     drop();
-    ret = readlinkat(perm_root, path, buf, buf_sz-1);
+    ret = UPFS(readlinkat)(perm_root, path, buf, buf_sz-1);
     regain();
     if (ret < 0) return -errno;
     buf[ret] = 0;
@@ -135,7 +162,7 @@ static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
 
     /* Create the full thing on the perms fs */
     drop();
-    ret = mknodat(perm_root, path, mode, dev);
+    ret = UPFS(mknodat)(perm_root, path, mode, dev);
     regain();
     if (ret < 0) return -errno;
 
@@ -151,7 +178,7 @@ static int upfs_mkdir(const char *path, mode_t mode)
     path = correct_path(path);
 
     drop();
-    ret = mkdirat(perm_root, path, mode);
+    ret = UPFS(mkdirat)(perm_root, path, mode);
     regain();
     if (ret < 0) return -errno;
 
@@ -166,7 +193,7 @@ static int upfs_unlink(const char *path)
     path = correct_path(path);
 
     drop();
-    perm_ret = unlinkat(perm_root, path, 0);
+    perm_ret = UPFS(unlinkat)(perm_root, path, 0);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -181,7 +208,7 @@ static int upfs_rmdir(const char *path)
     path = correct_path(path);
 
     drop();
-    perm_ret = unlinkat(perm_root, path, AT_REMOVEDIR);
+    perm_ret = UPFS(unlinkat)(perm_root, path, AT_REMOVEDIR);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -196,13 +223,13 @@ static int upfs_symlink(const char *target, const char *path)
     path = correct_path(path);
 
     drop();
-    ret = symlinkat(target, perm_root, path);
+    ret = UPFS(symlinkat)(target, perm_root, path);
     regain();
     if (ret < 0 && errno == ENOENT) {
         /* Maybe need to create containing directories */
         drop();
         mkdir_p(path);
-        ret = symlinkat(target, perm_root, path);
+        ret = UPFS(symlinkat)(target, perm_root, path);
         regain();
     }
     if (ret < 0) return -errno;
@@ -215,22 +242,44 @@ static int upfs_symlink(const char *target, const char *path)
 static int upfs_rename(const char *from, const char *to)
 {
     int perm_ret, store_ret;
-    from++;
-    to++;
+    struct stat sbuf;
+    int save_errno;
+    from = correct_path(from);
+    to = correct_path(to);
 
+    /* Get the properties of the original file */
     drop();
-    perm_ret = renameat(perm_root, from, perm_root, to);
+    perm_ret = UPFS(fstatat)(perm_root, from, &sbuf, 0);
     regain();
-    if (perm_ret < 0 && errno == ENOENT) {
-        drop();
-        mkdir_p(to);
-        perm_ret = renameat(perm_root, from, perm_root, to);
-        regain();
-    }
-    if (perm_ret < 0 && errno != ENOENT) return -errno;
+    if (perm_ret < 0) {
+        if (errno != ENOENT) return -errno;
 
+        /* Doesn't exist in the permissions, so just rename in the store */
+        store_ret = renameat(store_root, from, store_root, to);
+        if (store_ret < 0) return -errno;
+        return 0;
+    }
+
+    /* Set up an inaccessible new file to prevent tampering */
+    drop();
+    mkdir_p(to);
+    if (S_ISDIR(sbuf.st_mode))
+        perm_ret = UPFS(mkdirat)(perm_root, to, 0);
+    else
+        perm_ret = UPFS(mknodat)(perm_root, to, 0, 0);
+    regain();
+    if (perm_ret < 0) return -errno;
+
+    /* Rename it in the store */
     store_ret = renameat(store_root, from, store_root, to);
     if (store_ret < 0) return -errno;
+
+    /* And rename it in the permissions */
+    drop();
+    perm_ret = UPFS(renameat)(perm_root, from, perm_root, to);
+    regain();
+    if (perm_ret < 0) return -errno;
+
     return 0;
 }
 
@@ -241,7 +290,7 @@ static int upfs_chmod(const char *path, mode_t mode)
     path = correct_path(path);
 
     drop();
-    perm_ret = fchmodat(perm_root, path, mode, 0);
+    perm_ret = UPFS(fchmodat)(perm_root, path, mode, 0);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -251,7 +300,7 @@ static int upfs_chmod(const char *path, mode_t mode)
     if (perm_ret < 0) {
         drop();
         mkfull(path, &sbuf);
-        perm_ret = fchmodat(perm_root, path, mode, 0);
+        perm_ret = UPFS(fchmodat)(perm_root, path, mode, 0);
         regain();
     }
 
@@ -266,7 +315,7 @@ static int upfs_chown(const char *path, uid_t uid, gid_t gid)
     path = correct_path(path);
 
     drop();
-    perm_ret = fchownat(perm_root, path, uid, gid, 0);
+    perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, 0);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -276,7 +325,7 @@ static int upfs_chown(const char *path, uid_t uid, gid_t gid)
     if (perm_ret < 0) {
         drop();
         mkfull(path, &sbuf);
-        perm_ret = fchownat(perm_root, path, uid, gid, 0);
+        perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, 0);
         regain();
     }
 
@@ -292,7 +341,7 @@ static int upfs_truncate(const char *path, off_t length)
     path = correct_path(path);
 
     drop();
-    perm_fd = openat(perm_root, path, O_RDWR);
+    perm_fd = UPFS(openat)(perm_root, path, O_RDWR);
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
@@ -305,7 +354,7 @@ static int upfs_truncate(const char *path, off_t length)
         if (ret < 0) return -errno;
         drop();
         mkfull(path, &sbuf);
-        perm_fd = openat(perm_root, path, O_RDWR);
+        perm_fd = UPFS(openat)(perm_root, path, O_RDWR);
         regain();
     }
 
@@ -334,7 +383,7 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     path = correct_path(path);
 
     drop();
-    perm_fd = openat(perm_root, path, ffi->flags, 0);
+    perm_fd = UPFS(openat)(perm_root, path, ffi->flags, 0);
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
@@ -360,7 +409,7 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
         if (ret < 0) goto error;
         drop();
         mkfull(path, &sbuf);
-        perm_fd = openat(perm_root, path, ffi->flags, 0);
+        perm_fd = UPFS(openat)(perm_root, path, ffi->flags, 0);
         regain();
     }
     if (perm_fd < 0) goto error;
@@ -469,7 +518,7 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
     /* Check permissions */
     drop();
-    perm_fd = openat(perm_root, path, O_RDONLY, 0);
+    perm_fd = UPFS(openat)(perm_root, path, O_RDONLY, 0);
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
@@ -524,7 +573,7 @@ static int upfs_access(const char *path, int mode)
     path = correct_path(path);
 
     drop();
-    ret = faccessat(perm_root, path, mode, AT_EACCESS);
+    ret = UPFS(faccessat)(perm_root, path, mode, AT_EACCESS);
     regain();
     if (ret < 0 && errno != ENOENT) return -errno;
 
@@ -546,7 +595,7 @@ static int upfs_create(const char *path, mode_t mode,
     path = correct_path(path);
 
     drop();
-    perm_fd = openat(perm_root, path, O_RDWR|O_CREAT|O_EXCL, mode);
+    perm_fd = UPFS(openat)(perm_root, path, O_RDWR|O_CREAT|O_EXCL, mode);
     regain();
     if (perm_fd < 0) return -errno;
 
@@ -622,7 +671,7 @@ static int upfs_utimens(const char *path, const struct timespec times[2])
     path = correct_path(path);
 
     drop();
-    perm_ret = utimensat(perm_root, path, times, 0);
+    perm_ret = UPFS(utimensat)(perm_root, path, times, 0);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -632,7 +681,7 @@ static int upfs_utimens(const char *path, const struct timespec times[2])
     if (perm_ret < 0) {
         drop();
         mkfull(path, &sbuf);
-        perm_ret = utimensat(perm_root, path, times, 0);
+        perm_ret = UPFS(utimensat)(perm_root, path, times, 0);
         regain();
     }
     if (perm_ret < 0) return -errno;
