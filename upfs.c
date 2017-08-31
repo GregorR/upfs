@@ -19,21 +19,8 @@
 
 /* When using permissions tables on the store */
 #include "upfs-ps.h"
-
-static void drop(void)
-{
-    struct fuse_context *fctx = fuse_get_context();
-    if (fctx->umask == 0)
-        umask(022);
-    else
-        umask(fctx->umask);
-}
-
-static void regain(void)
-{
-    umask(0);
-}
-
+#define drop() do { 0; } while(0)
+#define regain() do { 0; } while(0)
 #define UPFS(func) upfs_ ## func
 
 #else
@@ -49,10 +36,6 @@ static void drop(void)
         perror("setfsuid");
         exit(1);
     }
-    if (fctx->umask == 0)
-        umask(022);
-    else
-        umask(fctx->umask);
 }
 
 /* Regain root privileges if applicable */
@@ -61,7 +44,6 @@ static void regain(void)
     int store_errno = errno;
     setfsgid(0);
     setfsuid(0);
-    umask(0);
     errno = store_errno;
 }
 
@@ -70,7 +52,7 @@ static void regain(void)
 #endif
 
 /* Our root paths and fds */
-char *perm_root_path = NULL, *store_root_path = NULL;
+static char *perm_root_path = NULL, *store_root_path = NULL;
 int perm_root = -1, store_root = -1;
 
 /* Correct incoming paths */
@@ -142,8 +124,34 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
 {
     ssize_t ret;
     struct stat sbuf;
+#ifdef UPFS_PS
+    int fd;
+#endif
     path = correct_path(path);
 
+#ifdef UPFS_PS
+    /* We store the link target in the store file, so just check that it claims
+     * to be a link */
+    ret = UPFS(fstatat)(perm_root, path, &sbuf, 0);
+    if (ret < 0) return -errno;
+    if (!S_ISLNK(sbuf.st_mode))
+        return -EINVAL;
+
+    /* Then read it */
+    fd = openat(store_root, path, O_RDONLY);
+    if (fd < 0) return -errno;
+    ret = read(fd, buf, buf_sz-1);
+    if (ret < 0) {
+        int save_errno = errno;
+        close(fd);
+        return -save_errno;
+    }
+    close(fd);
+    buf[ret] = 0;
+    return 0;
+
+#else
+    /* The link is stored as a link in the permissions directory */
     drop();
     ret = UPFS(readlinkat)(perm_root, path, buf, buf_sz-1);
     regain();
@@ -153,6 +161,8 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
     ret = fstatat(store_root, path, &sbuf, 0);
     if (ret < 0) return -errno;
     return 0;
+
+#endif
 }
 
 static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
@@ -220,8 +230,41 @@ static int upfs_rmdir(const char *path)
 static int upfs_symlink(const char *target, const char *path)
 {
     int ret;
+#ifdef UPFS_PS
+    int fd;
+    size_t target_sz;
+#endif
     path = correct_path(path);
 
+#ifdef UPFS_PS
+    /* We store the symlink in the store, so do this totally differently */
+    ret = UPFS(mknodat)(perm_root, path, S_IFREG, 0);
+    if (ret < 0 && errno == ENOENT) {
+        /* Create containing directories */
+        mkdir_p(path);
+        ret = UPFS(mknodat)(perm_root, path, S_IFREG, 0);
+    }
+    if (ret < 0) return -errno;
+
+    /* Now write the symlink file */
+    fd = openat(store_root, path, O_CREAT|O_EXCL, 0600);
+    if (fd < 0) return -errno;
+    target_sz = strlen(target);
+    if (write(fd, target, target_sz) != target_sz) {
+        int save_errno = errno;
+        close(fd);
+        if (save_errno) return -save_errno;
+        return -EIO;
+    }
+    close(fd);
+
+    /* Then replace it in the permissions */
+    ret = UPFS(fchmodat_harder)(perm_root, path, S_IFLNK|0644, 0);
+    if (ret < 0) return -errno;
+
+    return 0;
+
+#else
     drop();
     ret = UPFS(symlinkat)(target, perm_root, path);
     regain();
@@ -237,6 +280,8 @@ static int upfs_symlink(const char *target, const char *path)
     ret = mknodat(store_root, path, S_IFREG|0600, 0);
     if (ret < 0) return -errno;
     return 0;
+
+#endif
 }
 
 static int upfs_rename(const char *from, const char *to)
@@ -341,7 +386,7 @@ static int upfs_truncate(const char *path, off_t length)
     path = correct_path(path);
 
     drop();
-    perm_fd = UPFS(openat)(perm_root, path, O_RDWR);
+    perm_fd = UPFS(openat)(perm_root, path, O_RDWR, 0);
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
@@ -354,7 +399,7 @@ static int upfs_truncate(const char *path, off_t length)
         if (ret < 0) return -errno;
         drop();
         mkfull(path, &sbuf);
-        perm_fd = UPFS(openat)(perm_root, path, O_RDWR);
+        perm_fd = UPFS(openat)(perm_root, path, O_RDWR, 0);
         regain();
     }
 
@@ -446,16 +491,23 @@ static int upfs_write(const char *ignore, const char *buf, size_t size,
     off_t offset, struct fuse_file_info *ffi)
 {
     int ret;
-    int fd;
+    int perm_fd, store_fd;
 
     if (!ffi) return -ENOTSUP;
 
-    fd = (ffi->fh & (uint32_t) -1);
+    perm_fd = ffi->fh >> 32;
+    store_fd = (ffi->fh & (uint32_t) -1);
     if (ffi->nonseekable)
-        ret = write(fd, buf, size);
+        ret = write(store_fd, buf, size);
     else
-        ret = pwrite(fd, buf, size, offset);
+        ret = pwrite(store_fd, buf, size, offset);
     if (ret < 0) return -errno;
+
+#ifndef UPFS_PS
+    /* For performance reasons, with permissions in store we do this only once,
+     * at the end */
+    futimens(perm_fd, NULL);
+#endif
 
     return ret;
 }
@@ -484,6 +536,8 @@ static int upfs_release(const char *ignore, struct fuse_file_info *ffi)
 
     perm_fd = ffi->fh >> 32;
     store_fd = (ffi->fh & (uint32_t) -1);
+    if (ffi->flags & O_WRONLY)
+        UPFS(futimens)(perm_fd, NULL);
     close(perm_fd);
     close(store_fd);
 
@@ -572,10 +626,14 @@ static int upfs_access(const char *path, int mode)
     int ret;
     path = correct_path(path);
 
+#ifndef UPFS_PS
+    /* If we were using permission files in the store, we should be using
+     * default_permissions, and if not, everything goes */
     drop();
     ret = UPFS(faccessat)(perm_root, path, mode, AT_EACCESS);
     regain();
     if (ret < 0 && errno != ENOENT) return -errno;
+#endif
 
     /* Don't check execute bit on store FS */
     if (mode & X_OK) {
@@ -614,23 +672,32 @@ error:
 
 static int upfs_ftruncate(const char *ignore, off_t length, struct fuse_file_info *ffi)
 {
-    int fd, ret;
+    int perm_fd, store_fd, ret;
 
     if (!ffi) return -ENOTSUP;
 
-    fd = (ffi->fh & (uint32_t) -1);
-    ret = ftruncate(fd, length);
+    perm_fd = ffi->fh >> 32;
+    store_fd = (ffi->fh & (uint32_t) -1);
+    ret = ftruncate(store_fd, length);
     if (ret < 0) return -errno;
+#ifndef UPFS_PS
+    UPFS(futimens)(perm_fd, NULL);
+#endif
 
     return 0;
 }
 
-static int upfs_fgetattr(const char *ignore, struct stat *sbuf, struct fuse_file_info *ffi)
+static int upfs_fgetattr(const char *path, struct stat *sbuf, struct fuse_file_info *ffi)
 {
     int perm_fd, store_fd;
     int ret;
     struct stat store_buf;
 
+#ifdef UPFS_PS
+    /* We just have to stat the path and hope it hasn't been changed */
+    return upfs_getattr(path, sbuf);
+
+#else
     if (!ffi) return -ENOTSUP;
 
     perm_fd = ffi->fh >> 32;
@@ -646,6 +713,8 @@ static int upfs_fgetattr(const char *ignore, struct stat *sbuf, struct fuse_file
         sbuf->st_blksize = store_buf.st_blksize;
         sbuf->st_blocks = store_buf.st_blocks;
     }
+
+#endif
 
     return 0;
 }
@@ -737,11 +806,17 @@ int main(int argc, char **argv)
             if (arg[1] == 'o' && !arg[2])
                 fuse_argv[fai++] = argv[++ai];
 
+#ifdef UPFS_PS
+        } else if (!perm_root_path) {
+            perm_root_path = store_root_path = arg;
+
+#else
         } else if (!perm_root_path) {
             perm_root_path = arg;
 
         } else if (!store_root_path) {
             store_root_path = arg;
+#endif
 
         } else {
             fuse_argv[fai++] = arg;
@@ -750,21 +825,30 @@ int main(int argc, char **argv)
     }
 
     if (!perm_root_path || !store_root_path) {
+#ifdef UPFS_PS
+        fprintf(stderr, "Use: upfs-ps <root> <mount point>\n");
+#else
         fprintf(stderr, "Use: upfs <perm root> <store root> <mount point>\n");
+#endif
         return 1;
     }
 
     /* Open the roots */
+#ifndef UPFS_PS
     perm_root = open(perm_root_path, O_RDONLY);
     if (perm_root < 0) {
         perror(perm_root_path);
         return 1;
     }
+#endif
     store_root = open(store_root_path, O_RDONLY);
     if (store_root < 0) {
         perror(store_root_path);
         return 1;
     }
+#ifdef UPFS_PS
+    perm_root = store_root;
+#endif
 
     /* And run FUSE */
     umask(0);

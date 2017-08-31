@@ -24,13 +24,38 @@ struct upfs_entry_unused {
     uint32_t header, next;
 };
 
+struct upfs_time {
+    uint64_t sec;
+    uint32_t nsec;
+};
+
 struct upfs_entry {
     /* uid is -1 if this is as unused entry */
     uint32_t uid, gid;
     uint16_t mode, reserved;
+    struct upfs_time mtime, ctime;
     char name[UPFS_NAME_LENGTH];
 };
 
-/* Functions for accessing the permissions file will go here */
+/****************************************************************
+ * FILE SYSTEM SIMULATION FUNCTIONS
+ ***************************************************************/
+int upfs_fstatat(int dirfd, const char *pathname, struct stat *buf, int flags);
+int upfs_mknodat(int dir_fd, const char *path, mode_t mode, dev_t dev);
+int upfs_mkdirat(int dir_fd, const char *path, mode_t mode);
+int upfs_unlinkat(int dir_fd, const char *path, int flags);
+int upfs_fchmodat(int dir_fd, const char *path, mode_t mode, int flags);
+int upfs_renameat(int old_dir_fd, const char *old_path,
+    int new_dir_fd, const char *new_path);
+int upfs_fchownat(int dir_fd, const char *path, uid_t owner, gid_t group,
+    int flags);
+int upfs_openat(int dir_fd, const char *path, int flags, mode_t mode);
+int upfs_futimens(int fd, const struct timespec *times);
+int upfs_utimensat(int dir_fd, const char *path, const struct timespec *times,
+    int flags);
+
+/* This version of fchmodat allows you to change not just the permissions but
+ * the TYPE of the file */
+int upfs_fchmodat_harder(int dir_fd, const char *path, mode_t mode, int flags);
 
 #endif
