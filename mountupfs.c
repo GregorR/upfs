@@ -1,4 +1,5 @@
 #define _BSD_SOURCE /* strdup */
+#define _DEFAULT_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
