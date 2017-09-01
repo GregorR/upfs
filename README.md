@@ -10,16 +10,20 @@ contents are important. For each file in the store directory, if an
 identically-named file exists in the permissions directory, the owner, mode and
 type reflect the permissions version; for regular files, the size and content
 reflect the store version. If no identically-named file exists in the
-permissions directory, the file is world-readable and world-writeable, until
-"claimed" by being opened, at which point the opening user owns the file with
-standard (umasked) permissions.
+permissions directory, the file's permissions reflect those of the store
+directory, until "claimed" by being opened for writing, at which point the
+opening user owns the file with standard (umasked) permissions.
 
 The purpose of UpFS is to share a storage drive using, e.g. FAT32, but give it
 Unix permissions. Storing i-nodes for empty files doesn't take much space, so
 storing the Unix permissions directly in the host filesystem is reasonable.
 
-For instance, imagine that `/dev/sdb1` is a FAT32 filesystem to be used to store
-/home files, and its permissions will be stored in `/mnt/home_p`. You could
+Limitations unrelated to file ownership and permissions, such as file name or
+size restrictions, are inherited from the store directory. For instance, UpFS
+backed by a FAT32 store cannot store files larger than 2G.
+
+As an example usage, imagine that `/dev/sdb1` is a FAT32 filesystem to be used
+to store /home, and its permissions will be stored in `/mnt/home_p`. You could
 establish such a scheme like so:
 
 ```
@@ -41,8 +45,9 @@ permissions directly, so `default_permissions` just wastes time.
 
 For the most part, it's harmless to do anything with the store directory while
 UpFS isn't mounted. In particular, of course, this means that it's mostly
-harmless to mount the store directory in another operating system. Of course,
-it will be accessible with no permissions protection.
+harmless to mount the store directory in another operating system. That is the
+point, after all. Of course, it will be accessible with no permissions
+protection.
 
 There are some exceptions. Deleting files in the store can cause strange
 effects, as the files will not appear to exist when mounted under UpFS, but
@@ -97,7 +102,8 @@ Note that when using `upfs-ps` directly, is is mandatory to use
 
 UpFS-PS is much slower than UpFS, as `default_permissions` is slow, and the
 implementation of UpFS's index files is inefficient. UpFS-PS's index files are
-case insensitive, so they can be safely used with any underlying filesystem.
+case insensitive, so UpFS-PS can be safely used with a case-insensitive store
+filesystem.
 
 For `fstab` usage, `mount.upfsps` implements a `mount_r` option to mount its
 store directory.
@@ -111,3 +117,14 @@ realistic setups.
 
 It could just as well be implemented as a kernel module, but I haven't looked
 into this option.
+
+UpFS-PS's index files are named `.upfs`. Rather than having a single index file
+at the root of the store (which is how umsdos worked), there is an index file
+in every directory in which permissions have been set. This is a bit messy, but
+has some advantages with respect to performance and interoperability.
+
+`.upfs` files have a very trivial format, documented in `upfs-ps.h`. `.upfs`
+files are safe across machines with different word sizes, but are not safe
+across machines with different endians, they use the host endianness. This is
+more-or-less intentional, as big endian machines are sufficiently dead that
+compatibility with them isn't worthwhile.
