@@ -5,6 +5,7 @@
 
 #include "upfs-ps.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -34,10 +35,6 @@ static off_t upfs_alloc_entry(int tbl_fd, struct upfs_entry *data)
     uint32_t next;
     ssize_t rd;
     off_t loc;
-
-    /* We need to lock the table to make these changes */
-    if (flock(tbl_fd, LOCK_EX) < 0)
-        return -1;
 
     /* Get the current freelist entry */
     rd = pread(tbl_fd, &dh, sizeof(struct upfs_header), 0);
@@ -109,10 +106,6 @@ static int upfs_free_entry(int tbl_fd, off_t entry_offset)
     } de = {0};
     ssize_t rd;
 
-    /* We need to lock the table to make these changes */
-    if (flock(tbl_fd, LOCK_EX) < 0)
-        return -1;
-
     /* Get the current freelist entry */
     rd = pread(tbl_fd, &dh, sizeof(struct upfs_header), 0);
     if (rd < 0) {
@@ -140,14 +133,54 @@ static int upfs_free_entry(int tbl_fd, off_t entry_offset)
     return 0;
 }
 
+/* Split path into dir/file parts */
+static void split_path(const char *path, char path_parts[PATH_MAX], char **path_dir, char **path_file)
+{
+    char *path_base, *path_tmp;
+
+    /* Get our copy */
+    strncpy(path_parts, path, PATH_MAX);
+    path_parts[PATH_MAX-1] = 0;
+
+    /* Because the root is assumed to be vfat, we merge case */
+    for (path_tmp = path_parts; *path_tmp; path_tmp++) *path_tmp = tolower(*path_tmp);
+
+    path_base = path_parts;
+    path_tmp = strrchr(path_base, '/');
+
+    /* Remove any terminal / */
+    while (path_tmp && !path_tmp[1]) {
+        /* Ends with / */
+        *path_tmp = 0;
+        path_tmp = strrchr(path_base, '/');
+    }
+
+    /* Split it */
+    if (!path_tmp) {
+        /* No / */
+        *path_dir = ".";
+        *path_file = path_base;
+        if (!(*path_file)[0])
+            *path_file = ".";
+
+    } else {
+        /* Split it */
+        *path_tmp++ = 0;
+        *path_dir = path_base;
+        *path_file = path_tmp;
+
+    }
+}
+
+
 /* General-purpose permissions file "open". O_CREAT and O_EXCL are as in open,
  * O_APPEND means "open the directory with an exclusive lock", i.e., we intend
  * to change this directory entry. Other flags are ignored. */
 static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     struct upfs_open_out *o)
 {
-    char path_parts[PATH_MAX], *path_base, *path_tmp;
-    const char *path_dir, *path_file;
+    char path_parts[PATH_MAX];
+    char *path_dir, *path_file;
     struct upfs_header dh;
     struct upfs_entry de;
     struct fuse_context *fctx;
@@ -167,32 +200,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     }
 
     /* Split up the path */
-    strncpy(path_parts, path, PATH_MAX);
-    path_parts[PATH_MAX-1] = 0;
-    path_base = path_parts;
-    path_tmp = strrchr(path_base, '/');
-    while (path_tmp && !path_tmp[1]) {
-        /* Ends with / */
-        *path_tmp = 0;
-        path_tmp = strrchr(path_base, '/');
-    }
-    if (!path_tmp) {
-        /* No / */
-        path_dir = ".";
-        path_file = path_base;
-        if (!path_file[0]) {
-            /* Empty path */
-            errno = ENOENT;
-            goto error;
-        }
-
-    } else {
-        /* Split it */
-        *path_tmp++ = 0;
-        path_dir = path_base;
-        path_file = path_tmp;
-
-    }
+    split_path(path, path_parts, &path_dir, &path_file);
 
     /* The metafile itself is verboten */
     if (!strcmp(path_file, UPFS_META_FILE)) {
@@ -256,7 +264,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     }
 
     if (found) {
-        if (flags & (O_CREAT|O_EXCL)) {
+        if (flags&(O_CREAT|O_EXCL) == (O_CREAT|O_EXCL)) {
             /* Shouldn't have existed! */
             errno = EEXIST;
             goto error;
@@ -268,6 +276,12 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
         o->tbl_off = lseek(tbl_fd, 0, SEEK_CUR) - sizeof(struct upfs_entry);
 
     } else if (flags & O_CREAT) {
+        if (!(flags & O_APPEND)) {
+            /* Need an exclusive lock to create a new entry */
+            close(tbl_fd);
+            return upfs_ps_open(root_fd, path, flags|O_APPEND, mode, o);
+        }
+
         /* Create an entry for it */
         memset(&de, 0, sizeof(struct upfs_entry));
 
@@ -362,7 +376,7 @@ int upfs_unlinkat(int dir_fd, const char *path, int flags)
     int tbl_fd;
     struct upfs_open_out o = {0};
     o.tbl_fd = &tbl_fd;
-    if (upfs_ps_open(dir_fd, path, 0, 0, &o) < 0)
+    if (upfs_ps_open(dir_fd, path, O_APPEND, 0, &o) < 0)
         return -1;
 
     /* FIXME: Need empty directory testing */
@@ -420,27 +434,109 @@ int upfs_fchmodat(int dir_fd, const char *path, mode_t mode, int flags)
 int upfs_renameat(int old_dir_fd, const char *old_path,
     int new_dir_fd, const char *new_path)
 {
+    int ret = -1;
     int old_tbl_fd = -1, new_tbl_fd = -1;
     struct upfs_open_out oo = {0}, no = {0};
+    int old_subdir_fd = -1, new_subdir_fd = -1;
+    char old_path_parts[PATH_MAX], *old_path_dir, *old_path_file;
+    char new_path_parts[PATH_MAX], *new_path_dir, *new_path_file;
+    struct stat old_sbuf, new_sbuf;
     int save_errno;
     oo.tbl_fd = &old_tbl_fd;
     no.tbl_fd = &new_tbl_fd;
 
+    /* Figure out if we're in the special case of the same directory */
+    split_path(old_path, old_path_parts, &old_path_dir, &old_path_file);
+    split_path(new_path, new_path_parts, &new_path_dir, &new_path_file);
+    old_subdir_fd = openat(old_dir_fd, old_path_dir, O_RDONLY);
+    if (old_subdir_fd < 0)
+        goto done;
+    new_subdir_fd = openat(new_dir_fd, new_path_dir, O_RDONLY);
+    if (new_subdir_fd < 0)
+        goto done;
+    if (fstat(old_subdir_fd, &old_sbuf) < 0)
+        goto done;
+    if (fstat(new_subdir_fd, &new_sbuf) < 0)
+        goto done;
+
+    if (old_sbuf.st_ino == new_sbuf.st_ino &&
+        old_sbuf.st_dev == new_sbuf.st_dev) {
+        struct upfs_header dh;
+
+        close(old_subdir_fd);
+        old_subdir_fd = -1;
+
+        /* Same directory. We need to do this carefully. */
+        while (1) {
+            oo.tbl_fd = NULL;
+            if (upfs_ps_open(new_subdir_fd, old_path_file, 0, 0, &oo) < 0)
+                goto done;
+            if (upfs_ps_open(new_subdir_fd, new_path_file, O_APPEND|O_CREAT, S_IFREG, &no) < 0)
+                goto done;
+
+            /* Verify that the old file is still there */
+            if (pread(new_tbl_fd, &oo.de, sizeof(struct upfs_entry),
+                    oo.tbl_off) !=
+                sizeof(struct upfs_entry))
+                goto done;
+            if (oo.de.uid == (uint32_t) -1 || strncmp(oo.de.name, old_path_file, UPFS_NAME_LENGTH))
+                continue;
+
+            /* If the metadata is in the same spot, we're done */
+            if (oo.tbl_off == no.tbl_off) {
+                ret = 0;
+                goto done;
+            }
+
+            /* Copy over the metadata (FIXME: More automation please) */
+            no.de.uid = oo.de.uid;
+            no.de.gid = oo.de.gid;
+            no.de.mode = oo.de.mode;
+            no.de.reserved = 0;
+            no.de.mtime = oo.de.mtime;
+            no.de.ctime = oo.de.ctime;
+            if (pwrite(new_tbl_fd, &no.de, sizeof(struct upfs_entry),
+                    no.tbl_off) !=
+                sizeof(struct upfs_entry))
+                goto done;
+
+            /* And remove the old one */
+            if (upfs_free_entry(new_tbl_fd, oo.tbl_off) < 0)
+                goto done;
+
+            ret = 0;
+            goto done;
+        }
+    }
+
+    /* They're in different directories. */
+
     /* First stat both locations */
-    if (upfs_ps_open(old_dir_fd, old_path, 0, 0, &oo) < 0)
-        return -1;
-    if (upfs_ps_open(new_dir_fd, new_path, O_CREAT, 0, &no) < 0)
-        goto error;
+    if (upfs_ps_open(old_subdir_fd, old_path_file, O_APPEND, 0, &oo) < 0)
+        goto done;
+    if (upfs_ps_open(new_subdir_fd, new_path_file, O_CREAT, 0, &no) < 0)
+        goto done;
 
     /* Check for an incompatible move. (FIXME: Need to check for empty
      * directories) */
     if (S_ISDIR(oo.de.mode) && !S_ISDIR(no.de.mode)) {
         errno = ENOTDIR;
-        goto error;
+        goto done;
     }
     if (!S_ISDIR(oo.de.mode) && S_ISDIR(no.de.mode)) {
         errno = EISDIR;
-        goto error;
+        goto done;
+    }
+
+    /* Make sure we don't overwrite it with itself, as that'll wreak havok */
+    if (fstat(old_tbl_fd, &old_sbuf) < 0) goto done;
+    if (fstat(new_tbl_fd, &new_sbuf) < 0) goto done;
+    if (old_sbuf.st_ino == new_sbuf.st_ino &&
+        old_sbuf.st_dev == new_sbuf.st_dev) {
+        /* We're done, no real move */
+        close(old_tbl_fd);
+        close(new_tbl_fd);
+        return 0;
     }
 
     /* Copy the metadata (FIXME: Do this in an automated way without
@@ -453,24 +549,24 @@ int upfs_renameat(int old_dir_fd, const char *old_path,
     no.de.ctime = oo.de.ctime;
     if (pwrite(new_tbl_fd, &no.de, sizeof(struct upfs_entry), no.tbl_off) !=
         sizeof(struct upfs_entry))
-        goto error;
+        goto done;
     close(new_tbl_fd);
     new_tbl_fd = -1;
 
     /* And remove the old one */
     if (upfs_free_entry(old_tbl_fd, oo.tbl_off) < 0)
-        goto error;
-    close(old_tbl_fd);
-    old_tbl_fd = -1;
+        goto done;
 
-    return 0;
+    ret = 0;
 
-error:
+done:
     save_errno = errno;
+    if (old_subdir_fd >= 0) close(old_subdir_fd);
+    if (new_subdir_fd >= 0) close(new_subdir_fd);
     if (old_tbl_fd >= 0) close(old_tbl_fd);
     if (new_tbl_fd >= 0) close(new_tbl_fd);
     errno = save_errno;
-    return -1;
+    return ret;
 }
 
 int upfs_fchownat(int dir_fd, const char *path, uid_t owner, gid_t group,
