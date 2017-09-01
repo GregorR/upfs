@@ -188,7 +188,6 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     int save_errno;
     int found = 0;
     ssize_t rd;
-    off_t tbl_off;
 
     o->de.uid = (uint32_t) -1;
     if (o->tbl_fd) *o->tbl_fd = -1;
@@ -264,7 +263,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     }
 
     if (found) {
-        if (flags&(O_CREAT|O_EXCL) == (O_CREAT|O_EXCL)) {
+        if ((flags&(O_CREAT|O_EXCL)) == (O_CREAT|O_EXCL)) {
             /* Shouldn't have existed! */
             errno = EEXIST;
             goto error;
@@ -461,8 +460,6 @@ int upfs_renameat(int old_dir_fd, const char *old_path,
 
     if (old_sbuf.st_ino == new_sbuf.st_ino &&
         old_sbuf.st_dev == new_sbuf.st_dev) {
-        struct upfs_header dh;
-
         close(old_subdir_fd);
         old_subdir_fd = -1;
 

@@ -19,8 +19,8 @@
 
 /* When using permissions tables on the store */
 #include "upfs-ps.h"
-#define drop() do { 0; } while(0)
-#define regain() do { 0; } while(0)
+#define drop() do { } while(0)
+#define regain() do { } while(0)
 #define UPFS(func) upfs_ ## func
 
 #else
@@ -294,7 +294,6 @@ static int upfs_rename(const char *from, const char *to)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
-    int save_errno;
     from = correct_path(from);
     to = correct_path(to);
 
@@ -502,6 +501,7 @@ static int upfs_write(const char *ignore, const char *buf, size_t size,
     if (!ffi) return -ENOTSUP;
 
     perm_fd = ffi->fh >> 32;
+    (void) perm_fd;
     store_fd = (ffi->fh & (uint32_t) -1);
     if (ffi->nonseekable)
         ret = write(store_fd, buf, size);
@@ -688,6 +688,7 @@ static int upfs_ftruncate(const char *ignore, off_t length, struct fuse_file_inf
     if (!ffi) return -ENOTSUP;
 
     perm_fd = ffi->fh >> 32;
+    (void) perm_fd;
     store_fd = (ffi->fh & (uint32_t) -1);
     ret = ftruncate(store_fd, length);
     if (ret < 0) return -errno;
@@ -700,15 +701,15 @@ static int upfs_ftruncate(const char *ignore, off_t length, struct fuse_file_inf
 
 static int upfs_fgetattr(const char *path, struct stat *sbuf, struct fuse_file_info *ffi)
 {
-    int perm_fd, store_fd;
-    int ret;
-    struct stat store_buf;
-
 #ifdef UPFS_PS
     /* We just have to stat the path and hope it hasn't been changed */
     return upfs_getattr(path, sbuf);
 
 #else
+    int perm_fd, store_fd;
+    int ret;
+    struct stat store_buf;
+
     if (!ffi) return -ENOTSUP;
 
     perm_fd = ffi->fh >> 32;
