@@ -3,6 +3,7 @@
 #define FUSE_USE_VERSION 28
 #include <fuse.h>
 
+#include "upfs.h"
 #include "upfs-ps.h"
 
 #include <ctype.h>
@@ -133,46 +134,6 @@ static int upfs_free_entry(int tbl_fd, off_t entry_offset)
     return 0;
 }
 
-/* Split path into dir/file parts */
-static void split_path(const char *path, char path_parts[PATH_MAX], char **path_dir, char **path_file)
-{
-    char *path_base, *path_tmp;
-
-    /* Get our copy */
-    strncpy(path_parts, path, PATH_MAX);
-    path_parts[PATH_MAX-1] = 0;
-
-    /* Because the root is assumed to be vfat, we merge case */
-    for (path_tmp = path_parts; *path_tmp; path_tmp++) *path_tmp = tolower(*path_tmp);
-
-    path_base = path_parts;
-    path_tmp = strrchr(path_base, '/');
-
-    /* Remove any terminal / */
-    while (path_tmp && !path_tmp[1]) {
-        /* Ends with / */
-        *path_tmp = 0;
-        path_tmp = strrchr(path_base, '/');
-    }
-
-    /* Split it */
-    if (!path_tmp) {
-        /* No / */
-        *path_dir = ".";
-        *path_file = path_base;
-        if (!(*path_file)[0])
-            *path_file = ".";
-
-    } else {
-        /* Split it */
-        *path_tmp++ = 0;
-        *path_dir = path_base;
-        *path_file = path_tmp;
-
-    }
-}
-
-
 /* General-purpose permissions file "open". O_CREAT and O_EXCL are as in open,
  * O_APPEND means "open the directory with an exclusive lock", i.e., we intend
  * to change this directory entry. Other flags are ignored. */
@@ -199,7 +160,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     }
 
     /* Split up the path */
-    split_path(path, path_parts, &path_dir, &path_file);
+    split_path(path, path_parts, &path_dir, &path_file, 1);
 
     /* The metafile itself is verboten */
     if (!strcmp(path_file, UPFS_META_FILE)) {
@@ -445,8 +406,8 @@ int upfs_renameat(int old_dir_fd, const char *old_path,
     no.tbl_fd = &new_tbl_fd;
 
     /* Figure out if we're in the special case of the same directory */
-    split_path(old_path, old_path_parts, &old_path_dir, &old_path_file);
-    split_path(new_path, new_path_parts, &new_path_dir, &new_path_file);
+    split_path(old_path, old_path_parts, &old_path_dir, &old_path_file, 1);
+    split_path(new_path, new_path_parts, &new_path_dir, &new_path_file, 1);
     old_subdir_fd = openat(old_dir_fd, old_path_dir, O_RDONLY);
     if (old_subdir_fd < 0)
         goto done;

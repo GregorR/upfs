@@ -1,5 +1,7 @@
 #define _XOPEN_SOURCE 700 /* *at */
 
+#include "upfs.h"
+
 #define FUSE_USE_VERSION 28
 #include <fuse.h>
 
@@ -17,7 +19,7 @@
 
 #ifdef UPFS_PS
 
-/* When using permissions tables on the store */
+/* Using permissions tables on the store */
 #include "upfs-ps.h"
 #define drop() do { } while(0)
 #define regain() do { } while(0)
@@ -294,50 +296,78 @@ static int upfs_rename(const char *from, const char *to)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
+    char from_parts[PATH_MAX], to_parts[PATH_MAX];
+    char *from_dir, *from_file, *to_dir, *to_file;
+    int from_dir_fd = -1, to_dir_fd = -1;
+    int save_errno;
     from = correct_path(from);
     to = correct_path(to);
 
+    /* To avoid directory renaming causing issues and assure some kind of
+     * atomicity, get directory handles first */
+    split_path(from, from_parts, &from_dir, &from_file, 0);
+    split_path(to, to_parts, &to_dir, &to_file, 0);
+    drop();
+    from_dir_fd = openat(perm_root, from_dir, O_RDONLY, 0);
+    regain();
+    if (from_dir_fd < 0) goto error;
+    drop();
+    to_dir_fd = openat(perm_root, to_dir, O_RDONLY, 0);
+    regain();
+    if (to_dir_fd < 0) goto error;
+
     /* Get the properties of the original file */
     drop();
-    perm_ret = UPFS(fstatat)(perm_root, from, &sbuf, 0);
+    perm_ret = UPFS(fstatat)(from_dir_fd, from_file, &sbuf, 0);
     regain();
     if (perm_ret < 0) {
-        if (errno != ENOENT) return -errno;
+        if (errno != ENOENT) goto error;
 
         /* Doesn't exist in the permissions, so just rename in the store */
+        close(from_dir_fd);
+        close(to_dir_fd);
+        from_dir_fd = to_dir_fd = -1;
         store_ret = renameat(store_root, from, store_root, to);
-        if (store_ret < 0) return -errno;
+        if (store_ret < 0) goto error;
         return 0;
     }
 
-    /* Set up an inaccessible new file to prevent tampering (FIXME: tampering
-     * still possible if directories move) */
+    /* Set up an inaccessible new file to prevent tampering */
     drop();
     mkdir_p(to);
     if (S_ISDIR(sbuf.st_mode))
-        perm_ret = UPFS(mkdirat)(perm_root, to, 0);
+        perm_ret = UPFS(mkdirat)(to_dir_fd, to_file, 0);
     else
-        perm_ret = UPFS(mknodat)(perm_root, to, 0, 0);
+        perm_ret = UPFS(mknodat)(to_dir_fd, to_file, 0, 0);
     regain();
     if (perm_ret < 0 && errno == EEXIST) {
         /* We're overwriting a file. Just set its permissions to nil. */
         drop();
-        perm_ret = UPFS(fchmodat)(perm_root, to, 0, 0);
+        perm_ret = UPFS(fchmodat)(to_dir_fd, to_file, 0, 0);
         regain();
     }
-    if (perm_ret < 0) return -errno;
+    if (perm_ret < 0) goto error;
 
     /* Rename it in the store */
     store_ret = renameat(store_root, from, store_root, to);
-    if (store_ret < 0) return -errno;
+    if (store_ret < 0) goto error;
 
     /* And rename it in the permissions */
     drop();
-    perm_ret = UPFS(renameat)(perm_root, from, perm_root, to);
+    perm_ret = UPFS(renameat)(from_dir_fd, from_file, to_dir_fd, to_file);
     regain();
-    if (perm_ret < 0) return -errno;
+    if (perm_ret < 0) goto error;
 
+    close(from_dir_fd);
+    close(to_dir_fd);
     return 0;
+
+error:
+    save_errno = errno;
+    if (from_dir_fd >= 0) close(from_dir_fd);
+    if (to_dir_fd >= 0) close(to_dir_fd);
+    errno = save_errno;
+    return -1;
 }
 
 static int upfs_chmod(const char *path, mode_t mode)
