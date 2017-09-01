@@ -199,16 +199,20 @@ static int upfs_mkdir(const char *path, mode_t mode)
 
 static int upfs_unlink(const char *path)
 {
+    /* For removing files/directories, we need to do it in the opposite order
+     * to assure no race conditions in permissions and visibility */
     int perm_ret, store_ret;
     path = correct_path(path);
+
+    store_ret = unlinkat(store_root, path, 0);
+    if (store_ret < 0 && errno != ENOENT) return -errno;
 
     drop();
     perm_ret = UPFS(unlinkat)(perm_root, path, 0);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
-    store_ret = unlinkat(store_root, path, 0);
-    if (store_ret < 0) return -errno;
+    if (store_ret < 0) return -ENOENT;
     return 0;
 }
 
@@ -217,13 +221,15 @@ static int upfs_rmdir(const char *path)
     int perm_ret, store_ret;
     path = correct_path(path);
 
+    store_ret = unlinkat(store_root, path, AT_REMOVEDIR);
+    if (store_ret < 0 && errno != ENOENT) return -errno;
+
     drop();
     perm_ret = UPFS(unlinkat)(perm_root, path, AT_REMOVEDIR);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
-    store_ret = unlinkat(store_root, path, AT_REMOVEDIR);
-    if (store_ret < 0) return -errno;
+    if (store_ret < 0) return -ENOENT;
     return 0;
 }
 
