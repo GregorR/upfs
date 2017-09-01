@@ -310,7 +310,8 @@ static int upfs_rename(const char *from, const char *to)
         return 0;
     }
 
-    /* Set up an inaccessible new file to prevent tampering */
+    /* Set up an inaccessible new file to prevent tampering (FIXME: tampering
+     * still possible if directories move) */
     drop();
     mkdir_p(to);
     if (S_ISDIR(sbuf.st_mode))
@@ -318,6 +319,12 @@ static int upfs_rename(const char *from, const char *to)
     else
         perm_ret = UPFS(mknodat)(perm_root, to, 0, 0);
     regain();
+    if (perm_ret < 0 && errno == EEXIST) {
+        /* We're overwriting a file. Just set its permissions to nil. */
+        drop();
+        perm_ret = UPFS(fchmodat)(perm_root, to, 0, 0);
+        regain();
+    }
     if (perm_ret < 0) return -errno;
 
     /* Rename it in the store */
