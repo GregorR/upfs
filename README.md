@@ -5,13 +5,14 @@ permissions and ownership to files stored in a non-Unix filesystem. Think of it
 as a modern(ish) version of umsdos.
 
 UpFS expects a permissions directory and a store directory. The permissions of
-the store directory are ignored: Only its file and directory contents are
-important. For each file in the store directory, if an identically-named file
-exists in the permissions directory, the owner, mode and type reflect the
-permissions version; for regular files, the size and content reflect the store
-version. If no identically-named file exists in the permissions directory, the
-file is world-readable and world-writeable, until "claimed" by being opened, at
-which point the opening user owns the file with standard (umasked) permissions.
+the files in the store directory are ignored: Only its file and directory
+contents are important. For each file in the store directory, if an
+identically-named file exists in the permissions directory, the owner, mode and
+type reflect the permissions version; for regular files, the size and content
+reflect the store version. If no identically-named file exists in the
+permissions directory, the file is world-readable and world-writeable, until
+"claimed" by being opened, at which point the opening user owns the file with
+standard (umasked) permissions.
 
 The purpose of UpFS is to share a storage drive using, e.g. FAT32, but give it
 Unix permissions. Storing i-nodes for empty files doesn't take much space, so
@@ -28,7 +29,13 @@ establish such a scheme like so:
 ```
 
 Note in particular that for FAT, `check=s` is very important, to make the case
-sensitivity of the store and permissions directories the same.
+sensitivity of the store and permissions directories the same. If the
+permissions directory is case sensitive and the store directory is case
+insensitive, the permissions are bypassable, so be careful!
+
+When `upfs` is used directly, instead of through `mount.upfs`, you likely want
+`allow_others`. Do NOT enable `default_permissions`: `upfs` implements
+permissions directly, so `default_permissions` just wastes time.
 
 ## Sharing
 
@@ -70,6 +77,30 @@ mounted from another filesystem:
 Note that `noauto` on directories to be mounted by `mount_p` or `mount_s` isn't
 critical, but it does make the output a bit cleaner, as `upfs`'s `mount` will
 reliably succeed.
+
+## Permissions in the store
+
+As an alternative to mirroring the store directory into a separate permissions
+directory, UpFS is capable of storing the permissions in its own index files in
+the store directory, in a mode called UpFS-PS (UpFS-permissions-in-store).
+UpFS-PS is implemented in `upfs-ps` and `mount.upfsps`. For instance:
+
+```
+# mkdir /mnt/home_s
+# mount -t vfat -o check=s,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
+# mount -t upfsps /mnt/home_s /home
+```
+
+Note that when using `upfs-ps` directly, is is mandatory to use
+`default_permissions`; otherwise, permissions checks are not performed at all.
+`mount.upfsps` always sets `default_permissions`.
+
+UpFS-PS is much slower than UpFS, as `default_permissions` is slow, and the
+implementation of UpFS's index files is inefficient. UpFS-PS's index files are
+case insensitive, so they can be safely used with any underlying filesystem.
+
+For `fstab` usage, `mount.upfsps` implements a `mount_r` option to mount its
+store directory.
 
 ## Implementation
 
