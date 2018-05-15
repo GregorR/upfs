@@ -370,6 +370,95 @@ error:
     return -1;
 }
 
+#ifdef UPFS_LNCP
+/* A fake implementation of link through copying that may be good enough for
+ * some purposes */
+static int upfs_lncp(const char *from, const char *to)
+{
+#define BUFSZ 4096
+    int perm_ret, store_ret;
+    struct stat sbuf;
+    char from_parts[PATH_MAX], to_parts[PATH_MAX];
+    char *from_dir, *from_file, *to_dir, *to_file;
+    int from_dir_fd = -1, to_dir_fd = -1;
+    int from_file_fd = -1, to_file_fd = -1;
+    char *buf = NULL;
+    ssize_t rd;
+    int save_errno;
+    from = correct_path(from);
+    to = correct_path(to);
+
+    /* To avoid directory renaming causing issues and assure some kind of
+     * atomicity, get directory handles first */
+    split_path(from, from_parts, &from_dir, &from_file, 0);
+    split_path(to, to_parts, &to_dir, &to_file, 0);
+    drop();
+    from_dir_fd = openat(perm_root, from_dir, O_RDONLY, 0);
+    regain();
+    if (from_dir_fd < 0) goto error;
+    drop();
+    to_dir_fd = openat(perm_root, to_dir, O_RDONLY, 0);
+    regain();
+    if (to_dir_fd < 0) goto error;
+
+    /* Get the properties of the original file */
+    drop();
+    perm_ret = UPFS(fstatat)(from_dir_fd, from_file, &sbuf, AT_SYMLINK_NOFOLLOW);
+    regain();
+    if (perm_ret < 0) {
+        if (errno != ENOENT) goto error;
+
+        perm_ret = UPFS(fstatat)(store_root, from, &sbuf, AT_SYMLINK_NOFOLLOW);
+        if (perm_ret < 0) goto error;
+    }
+
+    /* Only files can be linked in this way for now */
+    if (!S_ISREG(sbuf.st_mode)) {
+        errno = EPERM;
+        goto error;
+    }
+
+    /* Set up the new permissions file */
+    drop();
+    mkdir_p(to);
+    perm_ret = UPFS(mknodat)(to_dir_fd, to_file, sbuf.st_mode, 0);
+    regain();
+    if (perm_ret < 0) goto error;
+
+    /* Copy it in the store */
+    from_file_fd = openat(store_root, from, O_RDONLY);
+    if (from_file_fd < 0) goto error;
+    to_file_fd = openat(store_root, to, O_WRONLY|O_CREAT|O_EXCL);
+    if (to_file_fd < 0) goto error;
+    buf = malloc(BUFSZ);
+    if (!buf) goto error;
+    while ((rd = read(from_file_fd, buf, BUFSZ)) > 0) {
+        if (write(to_file_fd, buf, rd) != rd) goto error;
+    }
+    if (rd < 0) goto error;
+    free(buf);
+    buf = NULL;
+    close(to_file_fd);
+    to_file_fd = -1;
+    close(from_file_fd);
+    from_file_fd = -1;
+
+    close(from_dir_fd);
+    close(to_dir_fd);
+    return 0;
+
+error:
+    save_errno = errno;
+    if (from_dir_fd >= 0) close(from_dir_fd);
+    if (to_dir_fd >= 0) close(to_dir_fd);
+    if (from_file_fd >= 0) close(from_file_fd);
+    if (to_file_fd >= 0) close(to_file_fd);
+    if (buf) free(buf);
+    errno = save_errno;
+    return -1;
+}
+#endif
+
 static int upfs_chmod(const char *path, mode_t mode)
 {
     int perm_ret, store_ret;
@@ -816,6 +905,9 @@ static struct fuse_operations upfs_operations = {
     .rmdir = upfs_rmdir,
     .symlink = upfs_symlink,
     .rename = upfs_rename,
+#ifdef UPFS_LNCP
+    .link = upfs_lncp,
+#endif
     .chmod = upfs_chmod,
     .chown = upfs_chown,
     .truncate = upfs_truncate,
