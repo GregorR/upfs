@@ -296,6 +296,7 @@ static int upfs_rename(const char *from, const char *to)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
+    int dir = 0;
     char from_parts[PATH_MAX], to_parts[PATH_MAX];
     char *from_dir, *from_file, *to_dir, *to_file;
     int from_dir_fd = -1, to_dir_fd = -1;
@@ -318,7 +319,7 @@ static int upfs_rename(const char *from, const char *to)
 
     /* Get the properties of the original file */
     drop();
-    perm_ret = UPFS(fstatat)(from_dir_fd, from_file, &sbuf, 0);
+    perm_ret = UPFS(fstatat)(from_dir_fd, from_file, &sbuf, AT_SYMLINK_NOFOLLOW);
     regain();
     if (perm_ret < 0) {
         if (errno != ENOENT) goto error;
@@ -331,16 +332,38 @@ static int upfs_rename(const char *from, const char *to)
         if (store_ret < 0) goto error;
         return 0;
     }
+    dir = S_ISDIR(sbuf.st_mode);
 
     /* Set up an inaccessible new file to prevent tampering */
     drop();
     mkdir_p(to);
-    if (S_ISDIR(sbuf.st_mode))
+    if (dir)
         perm_ret = UPFS(mkdirat)(to_dir_fd, to_file, 0);
     else
         perm_ret = UPFS(mknodat)(to_dir_fd, to_file, 0, 0);
     regain();
     if (perm_ret < 0 && errno == EEXIST) {
+        /* Make sure it's a file that saves our space */
+        drop();
+        perm_ret = UPFS(fstatat)(to_dir_fd, to_file, &sbuf, AT_SYMLINK_NOFOLLOW);
+        regain();
+        if (perm_ret < 0) goto error;
+        if (( dir && !S_ISDIR(sbuf.st_mode)) ||
+            (!dir && !S_ISREG(sbuf.st_mode))) {
+            /* We'll need to replace this */
+            drop();
+            perm_ret = UPFS(unlinkat)(to_dir_fd, to_file, 0);
+            regain();
+            if (perm_ret < 0) goto error;
+            drop();
+            if (dir)
+                perm_ret = UPFS(mkdirat)(to_dir_fd, to_file, 0);
+            else
+                perm_ret = UPFS(mknodat)(to_dir_fd, to_file, 0, 0);
+            regain();
+            if (perm_ret < 0) goto error;
+        }
+
         /* We're overwriting a file. Just set its permissions to nil. */
         drop();
         perm_ret = UPFS(fchmodat)(to_dir_fd, to_file, 0, 0);
@@ -491,7 +514,7 @@ static int upfs_chown(const char *path, uid_t uid, gid_t gid)
     path = correct_path(path);
 
     drop();
-    perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, 0);
+    perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, AT_SYMLINK_NOFOLLOW);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -501,7 +524,7 @@ static int upfs_chown(const char *path, uid_t uid, gid_t gid)
     if (perm_ret < 0) {
         drop();
         mkfull(path, &sbuf);
-        perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, 0);
+        perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, AT_SYMLINK_NOFOLLOW);
         regain();
     }
 
@@ -878,7 +901,7 @@ static int upfs_utimens(const char *path, const struct timespec times[2])
     path = correct_path(path);
 
     drop();
-    perm_ret = UPFS(utimensat)(perm_root, path, times, 0);
+    perm_ret = UPFS(utimensat)(perm_root, path, times, AT_SYMLINK_NOFOLLOW);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -888,7 +911,7 @@ static int upfs_utimens(const char *path, const struct timespec times[2])
     if (perm_ret < 0) {
         drop();
         mkfull(path, &sbuf);
-        perm_ret = UPFS(utimensat)(perm_root, path, times, 0);
+        perm_ret = UPFS(utimensat)(perm_root, path, times, AT_SYMLINK_NOFOLLOW);
         regain();
     }
     if (perm_ret < 0) return -errno;
