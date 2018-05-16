@@ -57,11 +57,49 @@ static void regain(void)
 static char *perm_root_path = NULL, *store_root_path = NULL;
 int perm_root = -1, store_root = -1;
 
+#ifdef UPFS_FATNAMES
+/* Convert paths for FAT */
+static void store_path(char *store, const char *path)
+{
+    int o, i;
+    for (o = i = 0; path[i] && i < PATH_MAX - 1 && o < PATH_MAX - 1; i++) {
+        char c = path[i];
+        switch (c) {
+            case '"': case '?': case ';': case ':': case '+': case '*':
+            case '|': case '<': case '>': case '!':
+            case '$':
+            case '\\':
+                if (o + 4 >= PATH_MAX - 1)
+                    break;
+                store[o++] = '$';
+                snprintf(store+o, 3, "%02X", (int) (unsigned char) c);
+                o += 2;
+                break;
+
+            default:
+                store[o++] = c;
+                break;
+        }
+    }
+    store[o] = 0;
+}
+#else
+static void store_path(char *store, const char *path)
+{
+    strncpy(store, path, PATH_MAX - 1);
+    store[PATH_MAX-1] = 0;
+}
+#endif
+
 /* Correct incoming paths */
-static const char *correct_path(const char *path)
+static const char *correct_path(const char *path, char *spath)
 {
     if (path[0] == '/') path++;
-    if (!path[0]) return ".";
+    if (!path[0]) {
+        strcpy(spath, ".");
+        return ".";
+    }
+    store_path(spath, path);
     return path;
 }
 
@@ -92,7 +130,7 @@ static void mkfull(const char *path, struct stat *sbuf)
         UPFS(mknodat)(perm_root, path, 0666, 0);
 }
 
-static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, struct stat *sbuf)
+static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, const char *spath, struct stat *sbuf)
 {
     int ret, store_ret;
     struct stat store_buf;
@@ -101,7 +139,7 @@ static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, struct s
     ret = UPFS(fstatat)(perm_dirfd, path, sbuf, AT_SYMLINK_NOFOLLOW);
     regain();
     if (ret >= 0) {
-        store_ret = fstatat(store_dirfd, path, &store_buf, 0);
+        store_ret = fstatat(store_dirfd, spath, &store_buf, 0);
         if (store_ret < 0) return -errno;
         if (S_ISREG(sbuf->st_mode)) {
             sbuf->st_size = store_buf.st_size;
@@ -112,24 +150,26 @@ static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, struct s
     }
     if (errno != ENOENT) return -errno;
 
-    ret = fstatat(store_dirfd, path, sbuf, 0);
+    ret = fstatat(store_dirfd, spath, sbuf, 0);
     if (ret >= 0) return ret;
     return -errno;
 }
 
 static int upfs_getattr(const char *path, struct stat *sbuf)
 {
-    return upfs_stat(perm_root, store_root, correct_path(path), sbuf);
+    char spath[PATH_MAX];
+    return upfs_stat(perm_root, store_root, correct_path(path, spath), spath, sbuf);
 }
 
 static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
 {
     ssize_t ret;
     struct stat sbuf;
+    char spath[PATH_MAX];
 #ifdef UPFS_PS
     int fd;
 #endif
-    path = correct_path(path);
+    path = correct_path(path, spath);
 
 #ifdef UPFS_PS
     /* We store the link target in the store file, so just check that it claims
@@ -140,7 +180,7 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
         return -EINVAL;
 
     /* Then read it */
-    fd = openat(store_root, path, O_RDONLY);
+    fd = openat(store_root, spath, O_RDONLY);
     if (fd < 0) return -errno;
     ret = read(fd, buf, buf_sz-1);
     if (ret < 0) {
@@ -160,7 +200,7 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
     if (ret < 0) return -errno;
     buf[ret] = 0;
 
-    ret = fstatat(store_root, path, &sbuf, 0);
+    ret = fstatat(store_root, spath, &sbuf, 0);
     if (ret < 0) return -errno;
     return 0;
 
@@ -170,7 +210,8 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
 static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
 {
     int ret;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     /* Create the full thing on the perms fs */
     drop();
@@ -179,7 +220,7 @@ static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
     if (ret < 0) return -errno;
 
     /* Then create an empty file to represent it on the store */
-    ret = mknodat(store_root, path, S_IFREG|0600, 0);
+    ret = mknodat(store_root, spath, S_IFREG|0600, 0);
     if (ret < 0) return -errno;
     return 0;
 }
@@ -187,14 +228,15 @@ static int upfs_mknod(const char *path, mode_t mode, dev_t dev)
 static int upfs_mkdir(const char *path, mode_t mode)
 {
     int ret;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     ret = UPFS(mkdirat)(perm_root, path, mode);
     regain();
     if (ret < 0) return -errno;
 
-    ret = mkdirat(store_root, path, 0700);
+    ret = mkdirat(store_root, spath, 0700);
     if (ret < 0) return -errno;
     return 0;
 }
@@ -204,9 +246,10 @@ static int upfs_unlink(const char *path)
     /* For removing files/directories, we need to do it in the opposite order
      * to assure no race conditions in permissions and visibility */
     int perm_ret, store_ret;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
-    store_ret = unlinkat(store_root, path, 0);
+    store_ret = unlinkat(store_root, spath, 0);
     if (store_ret < 0 && errno != ENOENT) return -errno;
 
     drop();
@@ -221,13 +264,14 @@ static int upfs_unlink(const char *path)
 static int upfs_rmdir(const char *path)
 {
     int perm_ret, store_ret;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     store_ret = unlinkat(store_root, path, AT_REMOVEDIR);
     if (store_ret < 0 && errno != ENOENT) return -errno;
 
     drop();
-    perm_ret = UPFS(unlinkat)(perm_root, path, AT_REMOVEDIR);
+    perm_ret = UPFS(unlinkat)(perm_root, spath, AT_REMOVEDIR);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -238,11 +282,12 @@ static int upfs_rmdir(const char *path)
 static int upfs_symlink(const char *target, const char *path)
 {
     int ret;
+    char spath[PATH_MAX];
 #ifdef UPFS_PS
     int fd;
     size_t target_sz;
 #endif
-    path = correct_path(path);
+    path = correct_path(path, spath);
 
 #ifdef UPFS_PS
     /* We store the symlink in the store, so do this totally differently */
@@ -255,7 +300,7 @@ static int upfs_symlink(const char *target, const char *path)
     if (ret < 0) return -errno;
 
     /* Now write the symlink file */
-    fd = openat(store_root, path, O_CREAT|O_EXCL, 0600);
+    fd = openat(store_root, spath, O_CREAT|O_EXCL, 0600);
     if (fd < 0) return -errno;
     target_sz = strlen(target);
     if (write(fd, target, target_sz) != target_sz) {
@@ -285,7 +330,7 @@ static int upfs_symlink(const char *target, const char *path)
     }
     if (ret < 0) return -errno;
 
-    ret = mknodat(store_root, path, S_IFREG|0600, 0);
+    ret = mknodat(store_root, spath, S_IFREG|0600, 0);
     if (ret < 0) return -errno;
     return 0;
 
@@ -301,8 +346,9 @@ static int upfs_rename(const char *from, const char *to)
     char *from_dir, *from_file, *to_dir, *to_file;
     int from_dir_fd = -1, to_dir_fd = -1;
     int save_errno;
-    from = correct_path(from);
-    to = correct_path(to);
+    char sfrom[PATH_MAX], sto[PATH_MAX];
+    from = correct_path(from, sfrom);
+    to = correct_path(to, sto);
 
     /* To avoid directory renaming causing issues and assure some kind of
      * atomicity, get directory handles first */
@@ -328,7 +374,7 @@ static int upfs_rename(const char *from, const char *to)
         close(from_dir_fd);
         close(to_dir_fd);
         from_dir_fd = to_dir_fd = -1;
-        store_ret = renameat(store_root, from, store_root, to);
+        store_ret = renameat(store_root, sfrom, store_root, to);
         if (store_ret < 0) goto error;
         return 0;
     }
@@ -372,7 +418,7 @@ static int upfs_rename(const char *from, const char *to)
     if (perm_ret < 0) goto error;
 
     /* Rename it in the store */
-    store_ret = renameat(store_root, from, store_root, to);
+    store_ret = renameat(store_root, sfrom, store_root, to);
     if (store_ret < 0) goto error;
 
     /* And rename it in the permissions */
@@ -408,19 +454,20 @@ static int upfs_lncp(const char *from, const char *to)
     char *buf = NULL;
     ssize_t rd;
     int save_errno;
-    from = correct_path(from);
-    to = correct_path(to);
+    char sfrom[PATH_MAX], sto[PATH_MAX];
+    from = correct_path(from, sfrom);
+    to = correct_path(to, sto);
 
     /* To avoid directory renaming causing issues and assure some kind of
      * atomicity, get directory handles first */
     split_path(from, from_parts, &from_dir, &from_file, 0);
     split_path(to, to_parts, &to_dir, &to_file, 0);
     drop();
-    from_dir_fd = openat(perm_root, from_dir, O_RDONLY, 0);
+    from_dir_fd = UPFS(openat)(perm_root, from_dir, O_RDONLY, 0);
     regain();
     if (from_dir_fd < 0) goto error;
     drop();
-    to_dir_fd = openat(perm_root, to_dir, O_RDONLY, 0);
+    to_dir_fd = UPFS(openat)(perm_root, to_dir, O_RDONLY, 0);
     regain();
     if (to_dir_fd < 0) goto error;
 
@@ -431,7 +478,7 @@ static int upfs_lncp(const char *from, const char *to)
     if (perm_ret < 0) {
         if (errno != ENOENT) goto error;
 
-        perm_ret = UPFS(fstatat)(store_root, from, &sbuf, AT_SYMLINK_NOFOLLOW);
+        perm_ret = fstatat(store_root, sfrom, &sbuf, AT_SYMLINK_NOFOLLOW);
         if (perm_ret < 0) goto error;
     }
 
@@ -449,9 +496,9 @@ static int upfs_lncp(const char *from, const char *to)
     if (perm_ret < 0) goto error;
 
     /* Copy it in the store */
-    from_file_fd = openat(store_root, from, O_RDONLY);
+    from_file_fd = openat(store_root, sfrom, O_RDONLY);
     if (from_file_fd < 0) goto error;
-    to_file_fd = openat(store_root, to, O_WRONLY|O_CREAT|O_EXCL);
+    to_file_fd = openat(store_root, sto, O_WRONLY|O_CREAT|O_EXCL);
     if (to_file_fd < 0) goto error;
     buf = malloc(BUFSZ);
     if (!buf) goto error;
@@ -486,14 +533,15 @@ static int upfs_chmod(const char *path, mode_t mode)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     perm_ret = UPFS(fchmodat)(perm_root, path, mode, 0);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
-    store_ret = fstatat(store_root, path, &sbuf, 0);
+    store_ret = fstatat(store_root, spath, &sbuf, 0);
     if (store_ret < 0) return -errno;
 
     if (perm_ret < 0) {
@@ -511,14 +559,15 @@ static int upfs_chown(const char *path, uid_t uid, gid_t gid)
 {
     int perm_ret, store_ret;
     struct stat sbuf;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     perm_ret = UPFS(fchownat)(perm_root, path, uid, gid, AT_SYMLINK_NOFOLLOW);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
-    store_ret = fstatat(store_root, path, &sbuf, 0);
+    store_ret = fstatat(store_root, spath, &sbuf, 0);
     if (store_ret < 0) return -errno;
 
     if (perm_ret < 0) {
@@ -537,19 +586,20 @@ static int upfs_truncate(const char *path, off_t length)
     int ret;
     int perm_fd = -1, store_fd = -1;
     int save_errno;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     perm_fd = UPFS(openat)(perm_root, path, O_RDWR, 0);
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
-    store_fd = openat(store_root, path, O_RDWR);
+    store_fd = openat(store_root, spath, O_RDWR);
     if (store_fd < 0) goto error;
 
     if (perm_fd < 0) {
         struct stat sbuf;
-        ret = fstatat(store_root, path, &sbuf, 0);
+        ret = fstatat(store_root, spath, &sbuf, 0);
         if (ret < 0) return -errno;
         drop();
         mkfull(path, &sbuf);
@@ -579,7 +629,8 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     int perm_fd = -1, store_fd = -1;
     int save_errno;
     struct stat sbuf;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     perm_fd = UPFS(openat)(perm_root, path, ffi->flags, 0);
@@ -598,13 +649,13 @@ static int upfs_open(const char *path, struct fuse_file_info *ffi)
     }
 
     if (store_fd < 0) {
-        store_fd = openat(store_root, path, ffi->flags, 0);
+        store_fd = openat(store_root, spath, ffi->flags, 0);
         if (store_fd < 0) goto error;
     }
 
     if (perm_fd < 0) {
         struct stat sbuf;
-        ret = fstatat(store_root, path, &sbuf, 0);
+        ret = fstatat(store_root, spath, &sbuf, 0);
         if (ret < 0) goto error;
         drop();
         mkfull(path, &sbuf);
@@ -730,7 +781,8 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     int perm_fd = -1, store_fd = -1, store_fd2 = -1;
     DIR *dh = NULL;
     struct dirent *de;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     /* Check permissions */
     drop();
@@ -739,7 +791,7 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 
     /* Open the store directory */
-    store_fd = openat(store_root, path, O_RDONLY, 0);
+    store_fd = openat(store_root, spath, O_RDONLY, 0);
     if (store_fd < 0) goto error;
 
     /* Prepare for readdir */
@@ -753,13 +805,37 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     /* And read it */
     while ((de = readdir(dh)) != NULL) {
         struct stat sbuf;
+        char pd_name[NAME_MAX];
 #ifdef UPFS_PS
         /* Skip the metafile */
         if (!strcmp(de->d_name, UPFS_META_FILE))
             continue;
 #endif
+
+#ifdef UPFS_FATNAMES
+        /* Convert the name back from mangling */
+        {
+            int o, i;
+            for (o = i = 0;
+                 de->d_name[i] && o < NAME_MAX - 1;
+                 i++) {
+                char c = de->d_name[i];
+                if (c == '$' && de->d_name[i+1] && de->d_name[i+2]) {
+                    char h[3];
+                    h[0] = de->d_name[i+1];
+                    h[1] = de->d_name[i+2];
+                    h[2] = 0;
+                    c = strtol(h, NULL, 16);
+                    i += 2;
+                }
+                pd_name[o++] = c;
+            }
+            pd_name[o] = 0;
+        }
+#endif
+
         if (perm_fd >= 0) {
-            ret = upfs_stat(perm_fd, store_fd, de->d_name, &sbuf);
+            ret = upfs_stat(perm_fd, store_fd, pd_name, de->d_name, &sbuf);
             if (ret < 0) {
                 errno = -ret;
                 goto error;
@@ -768,7 +844,7 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
             ret = fstatat(store_fd, de->d_name, &sbuf, 0);
             if (ret < 0) goto error;
         }
-        if (filler(buf, de->d_name, &sbuf, 0))
+        if (filler(buf, pd_name, &sbuf, 0))
             break;
     }
 
@@ -791,7 +867,8 @@ error:
 static int upfs_access(const char *path, int mode)
 {
     int ret;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
 #ifndef UPFS_PS
     /* If we were using permission files in the store, we should be using
@@ -807,7 +884,7 @@ static int upfs_access(const char *path, int mode)
         mode &= ~(X_OK);
         if (!mode) mode = R_OK;
     }
-    ret = faccessat(store_root, path, mode, 0);
+    ret = faccessat(store_root, spath, mode, 0);
     if (ret < 0) return -errno;
     return 0;
 }
@@ -817,14 +894,15 @@ static int upfs_create(const char *path, mode_t mode,
 {
     int perm_fd = -1, store_fd = -1;
     int save_errno;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     perm_fd = UPFS(openat)(perm_root, path, O_RDWR|O_CREAT|O_EXCL, mode);
     regain();
     if (perm_fd < 0) return -errno;
 
-    store_fd = openat(store_root, path, O_RDWR|O_CREAT|O_EXCL, 0600);
+    store_fd = openat(store_root, spath, O_RDWR|O_CREAT|O_EXCL, 0600);
     if (store_fd < 0) goto error;
 
     ffi->fh = ((uint64_t) perm_fd << 32) + store_fd;
@@ -905,14 +983,15 @@ static int upfs_utimens(const char *path, const struct timespec times[2])
 {
     int perm_ret, store_ret;
     struct stat sbuf;
-    path = correct_path(path);
+    char spath[PATH_MAX];
+    path = correct_path(path, spath);
 
     drop();
     perm_ret = UPFS(utimensat)(perm_root, path, times, AT_SYMLINK_NOFOLLOW);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
-    store_ret = fstatat(store_root, path, &sbuf, 0);
+    store_ret = fstatat(store_root, spath, &sbuf, 0);
     if (store_ret < 0) return -errno;
 
     if (perm_ret < 0) {

@@ -1,6 +1,6 @@
 CC=gcc
 ECFLAGS=-O3
-CFLAGS=-DUPFS_LNCP $(ECFLAGS)
+CFLAGS=-DUPFS_LNCP -DUPFS_FATNAMES $(ECFLAGS)
 FUSE_FLAGS=`pkg-config --cflags --libs fuse`
 
 all: upfs upfs-ps mount.upfs mount.upfsps
