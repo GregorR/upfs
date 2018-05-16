@@ -1,5 +1,6 @@
 CC=gcc
-CFLAGS=-O3 -DUPFS_LNCP
+ECFLAGS=-O3
+CFLAGS=-DUPFS_LNCP $(ECFLAGS)
 FUSE_FLAGS=`pkg-config --cflags --libs fuse`
 
 all: upfs upfs-ps mount.upfs mount.upfsps
