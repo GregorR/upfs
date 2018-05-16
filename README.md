@@ -28,13 +28,13 @@ establish such a scheme like so:
 
 ```
 # mkdir /mnt/home_s
-# mount -t vfat -o check=s,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
+# mount -t vfat -o check=s,shortname=winnt,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
 # mount -t upfs /mnt/home_p:/mnt/home_s /home
 ```
 
-Note in particular that for FAT, `check=s` is very important, to make the case
-sensitivity of the store and permissions directories the same. If the
-permissions directory is case sensitive and the store directory is case
+Note in particular that for FAT, `check=s,shortname=winnt` is very important,
+to make the case sensitivity of the store and permissions directories the same.
+If the permissions directory is case sensitive and the store directory is case
 insensitive, the permissions are bypassable, so be careful!
 
 When `upfs` is used directly, instead of through `mount.upfs`, you likely want
@@ -75,7 +75,7 @@ options to `mount.upfs`, but not `upfs`. An example with the storage directory
 mounted from another filesystem:
 
 ```
-/dev/sdb1 /mnt/disk_s vfat check=s,uid=0,gid=0,umask=077,noauto 0 2
+/dev/sdb1 /mnt/disk_s vfat check=s,shortname=winnt,uid=0,gid=0,umask=077,noauto 0 2
 /mnt/disk_p:/mnt/disk_s /mnt/disk upfs mount_s 0 2
 ```
 
@@ -92,7 +92,7 @@ UpFS-PS is implemented in `upfs-ps` and `mount.upfsps`. For instance:
 
 ```
 # mkdir /mnt/home_s
-# mount -t vfat -o check=s,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
+# mount -t vfat -o check=s,shortname=winnt,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
 # mount -t upfsps /mnt/home_s /home
 ```
 
