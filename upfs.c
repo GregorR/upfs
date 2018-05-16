@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/fsuid.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -139,6 +140,11 @@ static int upfs_stat(int perm_dirfd, int store_dirfd, const char *path, const ch
     ret = UPFS(fstatat)(perm_dirfd, path, sbuf, AT_SYMLINK_NOFOLLOW);
     regain();
     if (ret >= 0) {
+        if (S_ISLNK(sbuf->st_mode)) {
+            /* Links don't need a backing file, to support inter-case links */
+            return ret;
+        }
+
         store_ret = fstatat(store_dirfd, spath, &store_buf, 0);
         if (store_ret < 0) return -errno;
         if (S_ISREG(sbuf->st_mode)) {
@@ -200,8 +206,11 @@ static int upfs_readlink(const char *path, char *buf, size_t buf_sz)
     if (ret < 0) return -errno;
     buf[ret] = 0;
 
+#if 0
+    FIXME: For now, allow links with no backing file
     ret = fstatat(store_root, spath, &sbuf, 0);
     if (ret < 0) return -errno;
+#endif
     return 0;
 
 #endif
@@ -331,7 +340,19 @@ static int upfs_symlink(const char *target, const char *path)
     if (ret < 0) return -errno;
 
     ret = mknodat(store_root, spath, S_IFREG|0600, 0);
-    if (ret < 0) return -errno;
+    if (ret < 0) {
+#ifdef UPFS_FATNAMES /* FIXME: Not really related */
+        if (errno == EEXIST) {
+            /* As a special case, we ignore this if it's just a case link (symlink("foo", "FOO")) */
+            char path_parts[PATH_MAX];
+            char *path_dir, *path_file;
+            split_path(path, path_parts, &path_dir, &path_file, 0);
+            if (!strcasecmp(path_file, target))
+                return 0;
+        }
+#endif
+        return -errno;
+    }
     return 0;
 
 #endif
@@ -345,6 +366,7 @@ static int upfs_rename(const char *from, const char *to)
     char from_parts[PATH_MAX], to_parts[PATH_MAX];
     char *from_dir, *from_file, *to_dir, *to_file;
     int from_dir_fd = -1, to_dir_fd = -1;
+    int made_placeholder = 0;
     int save_errno;
     char sfrom[PATH_MAX], sto[PATH_MAX];
     from = correct_path(from, sfrom);
@@ -376,7 +398,8 @@ static int upfs_rename(const char *from, const char *to)
         from_dir_fd = to_dir_fd = -1;
         store_ret = renameat(store_root, sfrom, store_root, sto);
         if (store_ret < 0) goto error;
-        return 0;
+        errno = 0;
+        goto error;
     }
     dir = S_ISDIR(sbuf.st_mode);
 
@@ -388,32 +411,18 @@ static int upfs_rename(const char *from, const char *to)
     else
         perm_ret = UPFS(mknodat)(to_dir_fd, to_file, 0, 0);
     regain();
+    made_placeholder = 1;
     if (perm_ret < 0 && errno == EEXIST) {
-        /* Make sure it's a file that saves our space */
+        /* We're overwriting a file. Just set its permissions to nil, unless it's a symlink. */
         drop();
         perm_ret = UPFS(fstatat)(to_dir_fd, to_file, &sbuf, AT_SYMLINK_NOFOLLOW);
         regain();
-        if (perm_ret < 0) goto error;
-        if (( dir && !S_ISDIR(sbuf.st_mode)) ||
-            (!dir && !S_ISREG(sbuf.st_mode))) {
-            /* We'll need to replace this */
+        if (perm_ret < 0 || !S_ISLNK(sbuf.st_mode)) {
             drop();
-            perm_ret = UPFS(unlinkat)(to_dir_fd, to_file, 0);
+            perm_ret = UPFS(fchmodat)(to_dir_fd, to_file, 0, 0);
             regain();
-            if (perm_ret < 0) goto error;
-            drop();
-            if (dir)
-                perm_ret = UPFS(mkdirat)(to_dir_fd, to_file, 0);
-            else
-                perm_ret = UPFS(mknodat)(to_dir_fd, to_file, 0, 0);
-            regain();
-            if (perm_ret < 0) goto error;
         }
-
-        /* We're overwriting a file. Just set its permissions to nil. */
-        drop();
-        perm_ret = UPFS(fchmodat)(to_dir_fd, to_file, 0, 0);
-        regain();
+        made_placeholder = 0;
     }
     if (perm_ret < 0) goto error;
 
@@ -434,9 +443,13 @@ static int upfs_rename(const char *from, const char *to)
 error:
     save_errno = errno;
     if (from_dir_fd >= 0) close(from_dir_fd);
-    if (to_dir_fd >= 0) close(to_dir_fd);
+    if (to_dir_fd >= 0) {
+        if (made_placeholder)
+            UPFS(unlinkat)(to_dir_fd, to_file, dir?AT_REMOVEDIR:0);
+        close(to_dir_fd);
+    }
     errno = save_errno;
-    return -1;
+    return -errno;
 }
 
 #ifdef UPFS_LNCP
@@ -525,7 +538,7 @@ error:
     if (to_file_fd >= 0) close(to_file_fd);
     if (buf) free(buf);
     errno = save_errno;
-    return -1;
+    return -errno;
 }
 #endif
 
