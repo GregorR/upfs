@@ -65,8 +65,8 @@ static void store_path(char *store, const char *path)
     for (o = i = 0; path[i] && i < PATH_MAX - 1 && o < PATH_MAX - 1; i++) {
         char c = path[i];
         switch (c) {
-            case '"': case '?': case ';': case ':': case '+': case '*':
-            case '|': case '<': case '>': case '!':
+            case '"': case '?': case ':': case '*': case '|': case '<':
+            case '>':
             case '$':
             case '\\':
                 if (o + 4 >= PATH_MAX - 1)
@@ -267,11 +267,11 @@ static int upfs_rmdir(const char *path)
     char spath[PATH_MAX];
     path = correct_path(path, spath);
 
-    store_ret = unlinkat(store_root, path, AT_REMOVEDIR);
+    store_ret = unlinkat(store_root, spath, AT_REMOVEDIR);
     if (store_ret < 0 && errno != ENOENT) return -errno;
 
     drop();
-    perm_ret = UPFS(unlinkat)(perm_root, spath, AT_REMOVEDIR);
+    perm_ret = UPFS(unlinkat)(perm_root, path, AT_REMOVEDIR);
     regain();
     if (perm_ret < 0 && errno != ENOENT) return -errno;
 
@@ -374,7 +374,7 @@ static int upfs_rename(const char *from, const char *to)
         close(from_dir_fd);
         close(to_dir_fd);
         from_dir_fd = to_dir_fd = -1;
-        store_ret = renameat(store_root, sfrom, store_root, to);
+        store_ret = renameat(store_root, sfrom, store_root, sto);
         if (store_ret < 0) goto error;
         return 0;
     }
@@ -418,7 +418,7 @@ static int upfs_rename(const char *from, const char *to)
     if (perm_ret < 0) goto error;
 
     /* Rename it in the store */
-    store_ret = renameat(store_root, sfrom, store_root, to);
+    store_ret = renameat(store_root, sfrom, store_root, sto);
     if (store_ret < 0) goto error;
 
     /* And rename it in the permissions */
