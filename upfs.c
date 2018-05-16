@@ -667,6 +667,13 @@ static int upfs_write(const char *ignore, const char *buf, size_t size,
     return ret;
 }
 
+static int upfs_statfs(const char *ignore, struct statvfs *sbuf)
+{
+    int ret = fstatvfs(store_root, sbuf);
+    if (ret < 0) return -errno;
+    return ret;
+}
+
 static int upfs_flush(const char *ignore, struct fuse_file_info *ffi)
 {
     int ret;
@@ -937,6 +944,7 @@ static struct fuse_operations upfs_operations = {
     .open = upfs_open,
     .read = upfs_read,
     .write = upfs_write,
+    .statfs = upfs_statfs,
     .flush = upfs_flush,
     .release = upfs_release,
     .fsync = upfs_fsync,
