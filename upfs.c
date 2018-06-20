@@ -73,11 +73,20 @@ static void store_path(char *store, const char *path)
                 if (o + 4 >= PATH_MAX - 1)
                     break;
                 store[o++] = '$';
-                snprintf(store+o, 3, "%02X", (int) (unsigned char) c);
+                snprintf(store+o, 3, "%02x", (int) (unsigned char) c);
                 o += 2;
                 break;
 
             default:
+#ifdef UPFS_FATLOWERCASE
+                if (c >= 'A' && c <= 'Z') {
+                    if (o + 4 >= PATH_MAX - 1)
+                        break;
+                    store[o++] = '$';
+                    snprintf(store+o, 3, "%02x", (int) (unsigned char) c);
+                    o += 2;
+                } else
+#endif
                 store[o++] = c;
                 break;
         }
