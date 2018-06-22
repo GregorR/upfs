@@ -13,7 +13,7 @@
 #define UPFS_MAGIC_LENGTH       8
 
 /* The mode bits we support */
-#define UPFS_SUPPORTED_MODES    (07777|S_IFLNK|S_IFREG|S_IFDIR)
+#define UPFS_SUPPORTED_MODES    (07777|S_IFREG|S_IFDIR|S_IFLNK|S_IFIFO|S_IFSOCK)
 
 struct upfs_header {
     char magic[UPFS_MAGIC_LENGTH];
