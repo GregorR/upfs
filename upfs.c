@@ -490,11 +490,11 @@ static int upfs_lncp(const char *from, const char *to)
     split_path(from, from_parts, &from_dir, &from_file, 0);
     split_path(to, to_parts, &to_dir, &to_file, 0);
     drop();
-    from_dir_fd = UPFS(openat)(perm_root, from_dir, O_RDONLY, 0);
+    from_dir_fd = UPFS(openat)(perm_root, from_dir, O_RDONLY|O_DIRECTORY, 0);
     regain();
     if (from_dir_fd < 0) goto error;
     drop();
-    to_dir_fd = UPFS(openat)(perm_root, to_dir, O_RDONLY, 0);
+    to_dir_fd = UPFS(openat)(perm_root, to_dir, O_RDONLY|O_DIRECTORY, 0);
     regain();
     if (to_dir_fd < 0) goto error;
 
