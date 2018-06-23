@@ -285,6 +285,11 @@ static int upfs_rmdir(const char *path)
     char spath[PATH_MAX];
     path = correct_path(path, spath);
 
+#ifdef UPFS_PS
+    /* The index file will cause problems */
+    UPFS(unlink_empty_index)(perm_root, path);
+#endif
+
     store_ret = unlinkat(store_root, spath, AT_REMOVEDIR);
     if (store_ret < 0 && errno != ENOENT) return -errno;
 
@@ -808,7 +813,7 @@ static int upfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
     /* Check permissions */
     drop();
-    perm_fd = UPFS(openat)(perm_root, path, O_RDONLY, 0);
+    perm_fd = UPFS(openat)(perm_root, path, O_RDONLY|O_DIRECTORY, 0);
     regain();
     if (perm_fd < 0 && errno != ENOENT) return -errno;
 

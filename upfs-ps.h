@@ -37,6 +37,8 @@ struct upfs_entry {
     char name[UPFS_NAME_LENGTH];
 };
 
+int upfs_unlink_empty_index(int dir_fd, const char *path);
+
 /****************************************************************
  * FILE SYSTEM SIMULATION FUNCTIONS
  ***************************************************************/

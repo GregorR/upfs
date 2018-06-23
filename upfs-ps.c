@@ -72,7 +72,7 @@ static off_t upfs_alloc_entry(int tbl_fd, struct upfs_entry *data)
     rd = pread(tbl_fd, &old_de, sizeof(struct upfs_entry_unused), loc);
     if (rd < 0) {
         return -1;
-    } else if (rd != sizeof(struct upfs_entry)) {
+    } else if (rd != sizeof(struct upfs_entry_unused)) {
         errno = EIO;
         return -1;
     }
@@ -136,7 +136,8 @@ static int upfs_free_entry(int tbl_fd, off_t entry_offset)
 
 /* General-purpose permissions file "open". O_CREAT and O_EXCL are as in open,
  * O_APPEND means "open the directory with an exclusive lock", i.e., we intend
- * to change this directory entry. Other flags are ignored. */
+ * to change this directory entry. O_TRUNC means we're deleting the entire
+ * directory if it's empty. Other flags are ignored. */
 static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     struct upfs_open_out *o)
 {
@@ -147,7 +148,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     struct fuse_context *fctx;
     int dir_fd = -1, tbl_fd = -1;
     int save_errno;
-    int found = 0;
+    int found = 0, empty = 1;
     ssize_t rd;
 
     o->de.uid = (uint32_t) -1;
@@ -160,7 +161,14 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     }
 
     /* Split up the path */
-    split_path(path, path_parts, &path_dir, &path_file, 1);
+    if (flags & O_TRUNC) {
+        strncpy(path_parts, path, PATH_MAX);
+        path_parts[PATH_MAX-1] = 0;
+        path_dir = path_parts;
+        path_file = ".";
+    } else {
+        split_path(path, path_parts, &path_dir, &path_file, 1);
+    }
 
     /* The metafile itself is verboten */
     if (!strcmp(path_file, UPFS_META_FILE)) {
@@ -177,9 +185,6 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     tbl_fd = openat(dir_fd, UPFS_META_FILE, (flags&O_CREAT) ? (O_RDWR|O_CREAT) : O_RDWR, 0600);
     if (tbl_fd < 0)
         goto error; /* Can be a very minor error, but expected upstream */
-
-    close(dir_fd);
-    dir_fd = -1;
 
     if (flock(tbl_fd, (flags&O_APPEND) ? LOCK_EX : LOCK_SH) < 0)
         goto error;
@@ -216,14 +221,23 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
     /* Now read the directory entries */
     while (read(tbl_fd, &de, sizeof(struct upfs_entry)) ==
         sizeof(struct upfs_entry)) {
-        if (de.uid != (uint32_t) -1 && !strncmp(path_file, de.name, UPFS_NAME_LENGTH)) {
-            /* Found it! */
-            found = 1;
-            break;
+        if (de.uid != (uint32_t) -1) {
+            empty = 0;
+            if (!strncmp(path_file, de.name, UPFS_NAME_LENGTH)) {
+                /* Found it! */
+                found = 1;
+                break;
+            }
         }
     }
 
-    if (found) {
+    if (flags & O_TRUNC) {
+        if (empty) {
+            /* Delete the empty table */
+            unlinkat(dir_fd, UPFS_META_FILE, 0);
+        }
+
+    } else if (found) {
         if ((flags&(O_CREAT|O_EXCL)) == (O_CREAT|O_EXCL)) {
             /* Shouldn't have existed! */
             errno = EEXIST;
@@ -265,6 +279,7 @@ static int upfs_ps_open(int root_fd, const char *path, int flags, mode_t mode,
 
     if (!o->tbl_fd)
         close(tbl_fd);
+    close(dir_fd);
 
     return 0;
 
@@ -285,6 +300,13 @@ struct upfs_time time_now(void)
     ret.sec = ts.tv_sec;
     ret.nsec = ts.tv_nsec;
     return ret;
+}
+
+/* Unlink the index file in this directory if (and only if) it's empty */
+int upfs_unlink_empty_index(int dir_fd, const char *path)
+{
+    struct upfs_open_out o = {0};
+    return upfs_ps_open(dir_fd, path, O_APPEND|O_TRUNC, 0, &o);
 }
 
 /****************************************************************
@@ -339,7 +361,6 @@ int upfs_unlinkat(int dir_fd, const char *path, int flags)
     if (upfs_ps_open(dir_fd, path, O_APPEND, 0, &o) < 0)
         return -1;
 
-    /* FIXME: Need empty directory testing */
     if ((S_ISDIR(o.de.mode) && !(flags & AT_REMOVEDIR)) ||
         (!S_ISDIR(o.de.mode) && (flags & AT_REMOVEDIR))) {
         errno = EPERM;
@@ -555,6 +576,12 @@ int upfs_openat(int dir_fd, const char *path, int flags, mode_t mode)
 {
     int tbl_fd;
     struct upfs_open_out o = {0};
+
+    if (flags & O_DIRECTORY) {
+        /* We need to open this as a directory, not its entry */
+        return openat(dir_fd, path, flags, mode);
+    }
+
     o.tbl_fd = &tbl_fd;
     if (upfs_ps_open(dir_fd, path, flags&(O_CREAT|O_EXCL), S_IFREG|(mode&0777), &o) < 0)
         return -1;
