@@ -320,6 +320,14 @@ static int upfs_symlink(const char *target, const char *path)
         mkdir_p(path);
         ret = UPFS(mknodat)(perm_root, path, S_IFREG, 0);
     }
+    if (ret < 0 && errno == EEXIST) {
+        /* As a special case, we ignore this if it's just a case link (symlink("foo", "FOO")) */
+        char path_parts[PATH_MAX];
+        char *path_dir, *path_file;
+        split_path(path, path_parts, &path_dir, &path_file, 0);
+        if (!strcasecmp(path_file, target))
+            return 0;
+    }
     if (ret < 0) return -errno;
 
     /* Now write the symlink file */
