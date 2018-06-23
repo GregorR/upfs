@@ -323,7 +323,7 @@ static int upfs_symlink(const char *target, const char *path)
     if (ret < 0) return -errno;
 
     /* Now write the symlink file */
-    fd = openat(store_root, spath, O_CREAT|O_EXCL, 0600);
+    fd = openat(store_root, spath, O_WRONLY|O_CREAT|O_EXCL, 0600);
     if (fd < 0) return -errno;
     target_sz = strlen(target);
     if (write(fd, target, target_sz) != target_sz) {
