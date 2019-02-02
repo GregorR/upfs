@@ -32,7 +32,8 @@ backed by a FAT32 store cannot store files larger than 2G. UpFS does encode
 filenames so that symbols usually available in Unix filesystems but not FAT32
 (e.g. :) will work, and can optionally be configured to encode lower- and
 upper-case files separately, allowing for a fully case-sensitive filesystem
-backed by FAT32.
+backed by FAT32. In the default configuration, UpFS assumes the store will be
+case-insensitive but case-preserving.
 
 As an example usage, imagine that `/dev/sdb1` is a FAT32 filesystem to be used
 to store /home, and its permissions will be stored in `/mnt/home_p`. You could
@@ -40,14 +41,12 @@ establish such a scheme like so:
 
 ```
 # mkdir /mnt/home_s
-# mount -t vfat -o check=s,shortname=winnt,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
+# mount -t vfat -o shortname=winnt,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
 # mount -t upfs /mnt/home_p:/mnt/home_s /home
 ```
 
-Note in particular that for FAT, `check=s,shortname=winnt` is very important,
-to make the case sensitivity of the store and permissions directories the same.
-If the permissions directory is case sensitive and the store directory is case
-insensitive, the permissions are bypassable, so be careful!
+Note that for FAT32 on Linux in particular, shortname=winnt is necessary to
+assure all names are case-preserving.
 
 When `upfs` is used directly, instead of through `mount.upfs`, you likely want
 `allow_others`. Do NOT enable `default_permissions`: `upfs` implements
@@ -87,7 +86,7 @@ options to `mount.upfs`, but not `upfs`. An example with the storage directory
 mounted from another filesystem:
 
 ```
-/dev/sdb1 /mnt/disk_s vfat check=s,shortname=winnt,uid=0,gid=0,umask=077,noauto 0 2
+/dev/sdb1 /mnt/disk_s vfat shortname=winnt,uid=0,gid=0,umask=077,noauto 0 2
 /mnt/disk_p:/mnt/disk_s /mnt/disk upfs mount_s 0 2
 ```
 
@@ -104,7 +103,7 @@ UpFS-PS is implemented in `upfs-ps` and `mount.upfsps`. For instance:
 
 ```
 # mkdir /mnt/home_s
-# mount -t vfat -o check=s,shortname=winnt,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
+# mount -t vfat -o shortname=winnt,uid=0,gid=0,umask=077 /dev/sdb1 /mnt/home_s
 # mount -t upfsps /mnt/home_s /home
 ```
 
@@ -114,8 +113,7 @@ Note that when using `upfs-ps` directly, is is mandatory to use
 
 UpFS-PS is much slower than UpFS, as `default_permissions` is slow, and the
 implementation of UpFS's index files is inefficient. UpFS-PS's index files are
-case insensitive, so UpFS-PS can be safely used with a case-insensitive store
-filesystem.
+case insensitive.
 
 For `fstab` usage, `mount.upfsps` implements a `mount_r` option to mount its
 store directory.
