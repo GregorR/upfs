@@ -1,26 +1,35 @@
 # UpFS
 
-The Up Filesystem is a simple union-like filesystem used to add Unix
-permissions and ownership to files stored in a non-Unix filesystem. Think of it
-as a modern(ish) version of umsdos. The goal of UpFS is to allow partitions
-shared by Unix (presumably Linux) and Windows to be useful to both operating
-systems, reducing the usual issues of splitting limited disk space into
-separate partitions.
+The Up Filesystem is a modern answer to umsdos: It allows you to
+interchangeably extend a portable but feature-poor filesystem, typically FAT32,
+with Unix file ownership and permissions. The goal of UpFS is to allow partitions
+shared by Unix (presumably Linux) and Windows, Android and Mac OS X to be
+useful to both operating systems, reducing the usual issues of splitting
+limited disk space into separate partitions. Note that Android uses the Linux
+kernel, so it's natural to assume that it might support useful filesystems, but
+because it was designed by and for idiots, it cannot use portable storage
+devices with any useful filesystems, so even interacting with it is
+surprisingly painful.
+
+In terms of implementation, the Up Filesystem is a simple union-like filesystem
+used to add Unix permissions and ownership from a Unix filesystem to files
+stored in a non-Unix filesystem.
 
 For instance, the author of UpFS uses it on a dual-boot tablet PC, in which
 Linux's /home and Windows's D: are mounted to the same shared FAT32 space.
 Linux's / is an unshared (small) partition, while user files can be shared.
+UpFS is sufficient to be a root filesystem, but is better suited to /home.
 
-UpFS expects a permissions directory, typically on a standard Unix filesystem,
-and a store directory, typically on FAT32. The permissions of the files in the
-store directory are ignored: Only its file and directory contents are
-important. For each file in the store directory, if an identically-named file
-exists in the permissions directory, the owner, mode and type reflect the
-permissions version; for regular files, the size and content reflect the store
-version. If no identically-named file exists in the permissions directory, the
-file's permissions reflect those of the store directory, until "claimed" by
-being opened for writing, at which point the opening user owns the file with
-standard (umasked) permissions.
+UpFS expects a permissions directory, on a standard Unix filesystem, and a
+store directory, typically on FAT32 or exFAT. The permissions of the files in
+the store directory are ignored: Only its file and directory contents are
+important. For each file in the store directory, if an identically-named
+(except for case) file exists in the permissions directory, the owner, mode and
+type reflect the permissions version; for regular files, the size and content
+reflect the store version. If no identically-named file exists in the
+permissions directory, the file's permissions reflect those of the store
+directory, until "claimed" by being opened for writing, at which point the
+opening user owns the file with standard (umasked) permissions.
 
 The purpose of UpFS is to share a storage drive using, e.g. FAT32, but give it
 Unix permissions. Storing i-nodes for empty files doesn't take much space, so
